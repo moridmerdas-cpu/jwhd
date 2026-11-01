@@ -77,6 +77,8 @@ from telegram import (
     InlineKeyboardMarkup,
     Chat,
     User,
+    MessageOriginChannel,
+    MessageOriginChat,
 )
 from telegram.constants import ChatMemberStatus, ParseMode
 from telegram.error import BadRequest, Conflict, Forbidden, NetworkError, RetryAfter, TelegramError, TimedOut
@@ -1214,6 +1216,21 @@ def parse_chat_ref(text: str):
 
 
 async def owner_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        await _owner_private_message(update, context)
+    except Exception as exc:  # noqa: BLE001
+        # محافظ کلی: هر خطای پیش‌بینی‌نشده فقط لاگ می‌شود و کاربر پیام خالی نمی‌بیند
+        # (قبلاً همین‌جا یک AttributeError خاموش باعث می‌شد هیچ پاسخی برنگردد).
+        logger.error("خطای پردازش‌نشده در پیام پیوی: %s", exc, exc_info=exc)
+        message = update.effective_message
+        if message is not None:
+            try:
+                await message.reply_text("⚠️ خطای موقت رخ داد، دوباره تلاش کنید.")
+            except TelegramError:
+                pass
+
+
+async def _owner_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     user_id = update.effective_user.id
     if message is None:
@@ -1253,8 +1270,9 @@ async def owner_private_message(update: Update, context: ContextTypes.DEFAULT_TY
                 f"«{html.escape(chat_full.title or '')}» اضافه شد ✅", reply_markup=channels_menu_kb(scope)
             )
 
-        if message.forward_from_chat is not None:
-            await _finish_add(message.forward_from_chat)
+        origin = message.forward_origin
+        if isinstance(origin, (MessageOriginChannel, MessageOriginChat)):
+            await _finish_add(origin.chat)
             return
 
         text = (message.text or "").strip()
@@ -1267,7 +1285,7 @@ async def owner_private_message(update: Update, context: ContextTypes.DEFAULT_TY
                 return
             try:
                 chat_full = await context.bot.get_chat(chat_id_num)
-            except (BadRequest, Forbidden) as exc:
+            except (BadRequest, Forbidden, TimedOut, NetworkError) as exc:
                 await message.reply_text(f"خطا در دسترسی: {exc}")
                 return
             if chat_full.type not in (Chat.CHANNEL, Chat.GROUP, Chat.SUPERGROUP):
@@ -1280,7 +1298,7 @@ async def owner_private_message(update: Update, context: ContextTypes.DEFAULT_TY
         if ref is not None:
             try:
                 chat_full = await context.bot.get_chat(ref)
-            except (BadRequest, Forbidden) as exc:
+            except (BadRequest, Forbidden, TimedOut, NetworkError) as exc:
                 await message.reply_text(f"خطا در دسترسی: {exc}")
                 return
             if chat_full.type not in (Chat.CHANNEL, Chat.GROUP, Chat.SUPERGROUP):
