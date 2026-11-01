@@ -1,52 +1,43 @@
 #!/usr/bin/env python3
 """
-ربات جوین اجباری تلگرام
+عضویت اجباریه سپر — ربات عمومی و رایگانِ جوین اجباری چندگروهی
 نیازمندی‌ها: python-telegram-bot==22.8  (پایتون 3.10+)
 دیتابیس: Supabase (Postgres)
 نصب: pip install -r requirements.txt
 
-ساختار:
-- فقط در یک گروه کار می‌کند (گروهی که ادمین تنظیم می‌کند)
-- ادمین‌ها از طریق پیوی ربات: گروه، آیتم‌های عضویت (کانال/گروه/ربات) و متن پیام‌ها را مدیریت می‌کنند
-- هر پیام در گروه بلافاصله و به‌صورت موازی برای همه‌ی آیتم‌ها چک عضویت می‌شود (سریع، بدون از دست رفتن پیام)
-- در صورت عدم عضویت: پیام حذف و پیام هشدار با دکمه‌های شیشه‌ای ارسال می‌شود
-- زیر متنِ سفارشیِ ادمین، همیشه به‌صورت خودکار لیست موارد لازم (کانال/گروه/ربات) چاپ می‌شود
-- با کلیک روی دکمه «بررسی عضویت» وضعیت مجدد چک و پیام ادیت می‌شود
+معماری چندمستاجری:
+- ربات رایگان و عمومی است؛ هر کسی می‌تواند آن را به گروه خودش اضافه کند.
+- وقتی کسی ربات را در گروهی ادمین می‌کند، همان شخص «مالک آن گروه» ثبت می‌شود و
+  فقط او (یا مالک اصلی ربات) می‌تواند از پیوی ربات، آیتم‌های جوین اجباری همان
+  گروه، متن‌های هشدار/تاییدِ همان گروه و زمان حذف پیام هشدار را مدیریت کند.
+- مالک اصلیِ کل ربات، آیدی عددی ثابت OWNER_ID است. هر آیتمی که مالک اصلی اضافه
+  می‌کند «سراسری» است و به‌صورت خودکار در جوین اجباریِ همه‌ی گروه‌ها قرار می‌گیرد؛
+  مالک اصلی هم‌چنین دسترسی مدیریت به تمام گروه‌ها را دارد (پشتیبانی/نظارت).
+- بقیه‌ی کاربران (مالکان گروه‌ها) فقط می‌توانند آیتم‌های جوین اجباریِ گروه خودشان
+  را تنظیم کنند؛ این آیتم‌ها فقط در همان یک گروه اعمال می‌شوند.
 
 جدول‌های مورد نیاز در Supabase (SQL):
 
-    create table if not exists settings (
-        key text primary key,
-        value text
+    create table if not exists groups (
+        id bigint primary key,                 -- آیدی عددی گروه در تلگرام
+        owner_id bigint,                        -- آیدی عددی کسی که ربات را ادمین گروه کرده
+        title text,
+        warn_text text,
+        joined_text text,
+        delete_seconds double precision not null default 5,
+        created_at timestamptz not null default now()
     );
 
-    create table if not exists channels (
+    create table if not exists items (
         id bigint generated always as identity primary key,
+        group_id bigint references groups(id) on delete cascade,  -- NULL = سراسری (همه‌ی گروه‌ها)
         kind text not null default 'channel',   -- 'channel' | 'group' | 'bot'
-        chat_id text not null unique,           -- آیدی عددی کانال/گروه یا یوزرنیم ربات (بدون @)
+        chat_id text not null,                  -- آیدی عددی کانال/گروه یا یوزرنیم ربات (بدون @)
         title text not null,
         invite_link text not null,
-        expires_at timestamptz,                 -- زمان پایان جوین اجباریِ این آیتم (خالی = بدون محدودیت)
-        start_members bigint,                   -- تعداد اعضا در لحظه‌ی ثبت آیتم (مبنای شمارش ورودی‌ها)
-        member_limit bigint,                    -- تعرفه‌ی ممبر: تعداد ورودی مورد نیاز (خالی/0 = نامحدود)
-        quota_done boolean not null default false    -- true = تعرفه کامل شد و آیتم از جوین اجباری کنار رفته
+        created_at timestamptz not null default now()
     );
 
-
-    -- اگر جدول channels را قبلاً ساخته‌اید، فقط این را اجرا کنید:
-    alter table channels add column if not exists expires_at timestamptz;
-    alter table channels add column if not exists start_members bigint;
-    alter table channels add column if not exists member_limit bigint;
-    alter table channels add column if not exists quota_done boolean not null default false;
-
-    create table if not exists texts (
-        key text primary key,
-        value text
-    );
-
-    -- برای تایید عضویت در ربات‌ها. هر رباتِ دیگری که به‌عنوان آیتم اجباری
-    -- اضافه می‌شود، باید در هندلر /start خودش یک ردیف در این جدول ثبت کند
-    -- تا این ربات بتواند تشخیص دهد کاربر آن را استارت کرده یا نه.
     create table if not exists bot_starts (
         bot_username text not null,
         user_id bigint not null,
@@ -56,8 +47,14 @@
 
 نکته‌ی مهم درباره‌ی آیتم از نوع «ربات»:
 دکمه‌ی ربات یک لینک مستقیم به t.me/BOT?start=... است. بررسی واقعی ممکن نیست؛
-وقتی کاربر دکمه‌ی «بررسی عضویت» را می‌زند، ورود او به همه‌ی ربات‌ها تایید و در
-جدول bot_starts ثبت می‌شود. نیازی به تغییر در ربات مقصد یا دیتابیس مشترک نیست.
+وقتی کاربر دکمه‌ی «بررسی عضویت» را می‌زند، ورود او به همه‌ی ربات‌های آن لیست تایید
+و در جدول bot_starts ثبت می‌شود. نیازی به تغییر در ربات مقصد یا دیتابیس مشترک نیست.
+
+مصرف اینترنت:
+- ربات کاملاً وبهوکی است (بدون polling)، هر چک عضویت فقط یک درخواست کوچک JSON به
+  API تلگرام است، نتیجه‌ها کش می‌شوند (کش گروه/آیتم/عضویت) تا در هجوم پیام هم
+  درخواست تکراری زده نشود، و هیچ polling یا دانلود فایلی در کد وجود ندارد؛ برای
+  یک ربات با چند گروه معمولی، مصرف ماهانه به‌مراتب کمتر از ۵ گیگابایت می‌ماند.
 """
 
 import asyncio
@@ -67,13 +64,12 @@ import os
 import re
 import secrets
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Optional
 
 from aiohttp import web
 
 from supabase import create_client, Client, ClientOptions
-from postgrest import SyncPostgrestClient  # noqa: F401  (فقط برای وضوح وابستگی)
 
 from telegram import (
     Update,
@@ -101,19 +97,24 @@ from telegram.ext import (
 # ---------------------------------------------------------------------------
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
+BOT_DISPLAY_NAME = "عضویت اجباریه سپر"
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
 
-# آیدی عددی ادمین‌های ربات (اجباری، چند ادمین پشتیبانی می‌شود)
-ADMIN_IDS = {601668306, 8977934490} | {
+# مالک اصلیِ کل ربات (ثابت). از طریق env می‌توان مالکان اصلیِ بیشتری هم اضافه کرد.
+OWNER_ID = 8977934490
+SUPER_OWNER_IDS = {OWNER_ID} | {
     int(value.strip())
-    for value in os.environ.get("ADMIN_IDS", "").split(",")
-    if value.strip().isdigit()
+    for value in os.environ.get("EXTRA_OWNER_IDS", "").split(",")
+    if value.strip().lstrip("-").isdigit()
 }
+
+GLOBAL_SCOPE = "GLOBAL"
 
 DEFAULT_WARN_TEXT = "<b>کاربر {mention}\nبرای ارسال پیام باید در موارد زیر عضو شوید:</b>"
 DEFAULT_JOINED_TEXT = "<b>کاربر {mention} در همه‌ی موارد عضو شد ✅</b>"
+DEFAULT_DELETE_SECONDS = 5.0
 
 KIND_LABEL = {"channel": "کانال", "group": "گروه", "bot": "ربات"}
 KIND_ICON = {"channel": "📢", "group": "👥", "bot": "🤖"}
@@ -125,18 +126,11 @@ logging.basicConfig(
 logger = logging.getLogger("forcejoin_bot")
 
 # ---------------------------------------------------------------------------
-# لایه دیتابیس (Supabase) — با هندل خطا تا یک خطای موقت دیتابیس ربات را نخواباند
+# لایه دیتابیس (Supabase) — بلاک‌کننده را از event loop اصلی دور نگه می‌داریم
 # ---------------------------------------------------------------------------
-
-# مهم: تمام تماس‌های supabase-py «سینک/بلاک‌کننده» هستند (روی httpx sync ساخته شده‌اند).
-# اگر این توابع مستقیم داخل هندلرهای async صدا زده شوند، هر تماس دیتابیس کل
-# event loop تک‌رشته‌ای aiohttp/PTB را برای مدت تایم‌اوت (یا حتی بی‌نهایت،
-# اگر شبکه هنگ کند) فریز می‌کند. در حالت وبهوک یعنی هیچ آپدیت دیگری از تلگرام
-# پردازش نمی‌شود؛ از بیرون دقیقاً همین‌طور دیده می‌شود: «Render روشن است ولی
-# ربات جواب نمی‌دهد». برای همین:
-#   ۱) روی کلاینت supabase یک تایم‌اوت صریح و معقول ست شده (به‌جای رفتار پیش‌فرض نامشخص).
-#   ۲) هر متد این لایه از asyncio.to_thread استفاده می‌کند تا تماس بلاک‌کننده
-#      در ترد جدا اجرا شود و event loop اصلی هیچ‌وقت قفل نشود.
+# تمام تماس‌های supabase-py سینک/بلاک‌کننده هستند؛ برای همین هر تماس با
+# asyncio.to_thread در ترد جدا اجرا می‌شود تا event loop اصلی هیچ‌وقت قفل نشود
+# (در حالت وبهوک یعنی پردازش آپدیت‌های دیگر هیچ‌وقت متوقف نمی‌شود).
 
 DB_TIMEOUT_SECONDS = 10
 
@@ -155,12 +149,9 @@ def _safe_db(fn, default=None):
         return default
 
 
-# کش کوتاه‌مدت: هر پیام گروه قبلاً چندین تماس دیتابیس (گروه، آیتم‌ها، متن‌ها، ...) می‌زد و
-# تماس‌ها در ترد‌های محدود صف می‌کشیدند؛ همین باعث کندی حذف پیام‌ها در حالت هجوم پیام بود.
-# کش فقط نتیجه‌ی موفق را نگه می‌دارد و با هر تغییر ادمین بلافاصله پاک می‌شود.
-# تنظیمات/آیتم‌ها به‌ندرت تغییر می‌کنند و هر تغییر ادمین هم خودش کش را پاک می‌کند،
-# پس TTL طولانی هیچ تاخیری در دیدنِ تغییرات ایجاد نمی‌کند؛ فقط تعداد رفت‌وبرگشت
-# به Supabase را در هجوم پیام کم می‌کند.
+# کش کوتاه‌مدت: برای جلوگیری از رفت‌وبرگشت زیاد به Supabase در هجوم پیام (و در
+# نتیجه مصرف کمتر اینترنت). با هر تغییر ادمین بلافاصله پاک می‌شود، پس TTL
+# طولانی هیچ تاخیری در دیدنِ تغییرات ایجاد نمی‌کند.
 CACHE_TTL_SECONDS = 90.0
 _db_cache: dict = {}
 
@@ -181,70 +172,108 @@ def _cache_clear() -> None:
     _membership_cache.clear()
 
 
-async def get_setting(key: str) -> Optional[str]:
-    hit, cached = _cache_get(f"setting:{key}")
+# ---------------------------------------------------------------------------
+# گروه‌ها
+# ---------------------------------------------------------------------------
+
+
+async def get_group(group_id: int) -> Optional[dict]:
+    hit, cached = _cache_get(f"group:{group_id}")
     if hit:
         return cached
 
     def _run():
-        res = supabase.table("settings").select("value").eq("key", key).execute()
-        value = res.data[0]["value"] if res.data else None
-        if value is not None:
-            _cache_put(f"setting:{key}", value)
+        res = supabase.table("groups").select("*").eq("id", group_id).execute()
+        value = res.data[0] if res.data else None
+        _cache_put(f"group:{group_id}", value)
         return value
 
     return await asyncio.to_thread(_safe_db, _run, None)
 
 
-async def set_setting(key: str, value: str) -> Optional[str]:
+async def list_groups_by_owner(owner_id: int) -> list:
     def _run():
-        supabase.table("settings").upsert({"key": key, "value": value}).execute()
+        res = supabase.table("groups").select("*").eq("owner_id", owner_id).order("title").execute()
+        return res.data or []
+
+    return await asyncio.to_thread(_safe_db, _run, [])
+
+
+async def list_all_groups() -> list:
+    def _run():
+        res = supabase.table("groups").select("*").order("title").execute()
+        return res.data or []
+
+    return await asyncio.to_thread(_safe_db, _run, [])
+
+
+async def upsert_group_owner(group_id: int, owner_id: int, title: str) -> None:
+    """وقتی ربات به گروهی اضافه/ادمین می‌شود صدا زده می‌شود؛ مالک همان لحظه را ثبت می‌کند."""
+
+    def _run():
+        existing = supabase.table("groups").select("id").eq("id", group_id).execute().data
+        payload = {"id": group_id, "owner_id": owner_id, "title": title}
+        if existing:
+            supabase.table("groups").update(payload).eq("id", group_id).execute()
+        else:
+            supabase.table("groups").insert(payload).execute()
+
+    await asyncio.to_thread(_safe_db, _run, None)
+    _cache_clear()
+
+
+async def set_group_field(group_id: int, field: str, value) -> Optional[str]:
+    def _run():
+        supabase.table("groups").update({field: value}).eq("id", group_id).execute()
 
     try:
         await asyncio.to_thread(_run)
         _cache_clear()
         return None
     except Exception as exc:  # noqa: BLE001
-        logger.error("خطای دیتابیس هنگام ذخیره تنظیمات: %s", exc)
+        logger.error("خطای دیتابیس هنگام ذخیره تنظیمات گروه: %s", exc)
         return str(exc)
 
 
-async def get_group_id() -> Optional[int]:
-    val = await get_setting("group_id")
-    return int(val) if val else None
-
-
-async def set_group_id(chat_id: int) -> Optional[str]:
-    return await set_setting("group_id", str(chat_id))
-
-
-DEFAULT_WARN_DELETE_SECONDS = 5
-
-
-async def get_warn_delete_seconds() -> float:
-    val = await get_setting("warn_delete_seconds")
-    if val is None:
-        return DEFAULT_WARN_DELETE_SECONDS
+async def get_warn_delete_seconds(group: Optional[dict]) -> float:
+    if not group:
+        return DEFAULT_DELETE_SECONDS
     try:
-        return float(val)
+        return float(group.get("delete_seconds") or DEFAULT_DELETE_SECONDS)
     except (TypeError, ValueError):
-        return DEFAULT_WARN_DELETE_SECONDS
+        return DEFAULT_DELETE_SECONDS
 
 
-async def set_warn_delete_seconds(seconds: float) -> Optional[str]:
-    return await set_setting("warn_delete_seconds", str(seconds))
+def can_manage_scope(scope: str, user_id: int, group: Optional[dict]) -> bool:
+    if user_id in SUPER_OWNER_IDS:
+        return True
+    if scope == GLOBAL_SCOPE:
+        return False
+    return bool(group) and group.get("owner_id") == user_id
 
 
-async def add_item(kind: str, chat_id: str, title: str, invite_link: str, start_members: Optional[int] = None) -> Optional[str]:
+# ---------------------------------------------------------------------------
+# آیتم‌های جوین اجباری
+# ---------------------------------------------------------------------------
+
+
+def _scope_group_id(scope: str) -> Optional[int]:
+    return None if scope == GLOBAL_SCOPE else int(scope)
+
+
+async def add_item(scope: str, kind: str, chat_id: str, title: str, invite_link: str) -> Optional[str]:
     """در صورت موفقیت None برمی‌گرداند، در صورت خطا متن خطا را برمی‌گرداند."""
+    group_id = _scope_group_id(scope)
 
     def _run():
-        payload = {"kind": kind, "chat_id": chat_id, "title": title, "invite_link": invite_link}
-        existing = supabase.table("channels").select("id,start_members").eq("chat_id", chat_id).execute().data
-        # مبنای شمارش فقط یک بار ثبت می‌شود؛ ثبت مجدد همان آیتم آن را ریست نمی‌کند
-        if start_members is not None and not (existing and existing[0].get("start_members") is not None):
-            payload["start_members"] = start_members
-        supabase.table("channels").upsert(payload, on_conflict="chat_id").execute()
+        q = supabase.table("items").select("id").eq("chat_id", chat_id).eq("kind", kind)
+        q = q.is_("group_id", "null") if group_id is None else q.eq("group_id", group_id)
+        existing = q.execute().data
+        payload = {"group_id": group_id, "kind": kind, "chat_id": chat_id, "title": title, "invite_link": invite_link}
+        if existing:
+            supabase.table("items").update(payload).eq("id", existing[0]["id"]).execute()
+        else:
+            supabase.table("items").insert(payload).execute()
 
     try:
         await asyncio.to_thread(_run)
@@ -257,7 +286,7 @@ async def add_item(kind: str, chat_id: str, title: str, invite_link: str, start_
 
 async def update_item_link(item_id: int, invite_link: str) -> Optional[str]:
     def _run():
-        supabase.table("channels").update({"invite_link": invite_link}).eq("id", item_id).execute()
+        supabase.table("items").update({"invite_link": invite_link}).eq("id", item_id).execute()
 
     try:
         await asyncio.to_thread(_run)
@@ -270,267 +299,65 @@ async def update_item_link(item_id: int, invite_link: str) -> Optional[str]:
 
 async def remove_item_by_id(item_id: int) -> bool:
     res = await asyncio.to_thread(
-        _safe_db, lambda: supabase.table("channels").delete().eq("id", item_id).execute()
+        _safe_db, lambda: supabase.table("items").delete().eq("id", item_id).execute()
     )
     _cache_clear()
     return bool(res and res.data)
 
 
-async def _fetch_items() -> list:
-    hit, cached = _cache_get("items")
+async def list_scope_items(scope: str) -> list:
+    """آیتم‌های تعریف‌شده در همین scope (برای پنل مدیریت)."""
+    group_id = _scope_group_id(scope)
+    key = f"scope_items:{scope}"
+    hit, cached = _cache_get(key)
     if hit:
         return cached
 
     def _run():
-        res = (
-            supabase.table("channels")
-            .select("id,kind,chat_id,title,invite_link,expires_at,start_members,member_limit,quota_done")
-            .order("id")
-            .execute()
-        )
-        items = res.data or []
-        _cache_put("items", items)
+        q = supabase.table("items").select("*").order("id")
+        q = q.is_("group_id", "null") if group_id is None else q.eq("group_id", group_id)
+        items = q.execute().data or []
+        _cache_put(key, items)
         return items
 
     return await asyncio.to_thread(_safe_db, _run, [])
 
 
-def _parse_ts(value) -> Optional[datetime]:
-    if not value:
-        return None
-    try:
-        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
-
-
-def item_is_expired(item: dict) -> bool:
-    if item.get("quota_done"):
-        return True  # تعرفه‌ی ممبر کامل شده
-    expires_at = _parse_ts(item.get("expires_at"))
-    return expires_at is not None and expires_at <= datetime.now(timezone.utc)
-
-
-def format_duration(delta: timedelta) -> str:
-    total = max(int(delta.total_seconds()), 0)
-    days, rem = divmod(total, 86400)
-    hours, rem = divmod(rem, 3600)
-    minutes = rem // 60
-    parts = []
-    if days:
-        parts.append(f"{days} روز")
-    if hours:
-        parts.append(f"{hours} ساعت")
-    if minutes and not days:
-        parts.append(f"{minutes} دقیقه")
-    return " و ".join(parts) if parts else "کمتر از یک دقیقه"
-
-
-def describe_item_schedule(item: dict) -> str:
-    if item.get("queued"):
-        return "⏳ در صف انتظار (هنوز وارد جوین اجباری نشده)"
-    if item.get("quota_done"):
-        return "⛔️ تعرفه‌ی ممبر کامل شد (دیگر جوین اجباری نیست)"
-    expires_at = _parse_ts(item.get("expires_at"))
-    if expires_at is None:
-        return "فعال، بدون محدودیت زمانی"
-    if item_is_expired(item):
-        return "⛔️ منقضی شده (دیگر جوین اجباری نیست)"
-    return f"فعال، {format_duration(expires_at - datetime.now(timezone.utc))} دیگر باقی مانده"
-
-
-async def list_items() -> list:
-    """آیتم‌های فعالِ جوین اجباری (آیتم‌های منقضی‌شده یا تکمیل‌شده از نظر تعرفه حذف می‌شوند)."""
-    items = await _fetch_items()
-    await _enforce_quotas(items)
-    return [it for it in items if not it.get("queued") and not item_is_expired(it)]
-
-
-async def list_all_items() -> list:
-    """همه‌ی آیتم‌ها (شامل منقضی‌شده‌ها) برای پنل مدیریت."""
-    return await _fetch_items()
-
-
-async def get_item(item_id: int) -> Optional[dict]:
-    for it in await list_all_items():
-        if it["id"] == item_id:
-            return it
-    return None
-
-
-async def get_item_by_chat_id(chat_id: str) -> Optional[dict]:
-    for it in await list_all_items():
-        if str(it["chat_id"]) == str(chat_id):
-            return it
-    return None
-
-
-EXPIRES_AT_MISSING_HINT = (
-    "ستون expires_at در جدول channels وجود ندارد. این کوئری را در Supabase اجرا کنید:\n"
-    "alter table channels add column if not exists expires_at timestamptz;"
-)
-
-
-async def set_item_expiry(item_id: int, expires_at: Optional[datetime]) -> Optional[str]:
-    """expires_at=None یعنی فعال‌سازی هم‌اکنون بدون محدودیت زمانی. در صورت خطا متن خطا را برمی‌گرداند."""
-    value = expires_at.isoformat() if expires_at else None
-
-    def _run():
-        supabase.table("channels").update({"expires_at": value}).eq("id", item_id).execute()
-
-    try:
-        await asyncio.to_thread(_run)
-        _cache_clear()
-        return None
-    except Exception as exc:  # noqa: BLE001
-        logger.error("خطای دیتابیس هنگام تنظیم زمان آیتم: %s", exc)
-        if "expires_at" in str(exc):
-            return EXPIRES_AT_MISSING_HINT
-        return str(exc)
-
-
-MEMBER_LIMIT_MISSING_HINT = (
-    "ستون‌های تعرفه‌ی ممبر در جدول channels وجود ندارند. این کوئری‌ها را در Supabase اجرا کنید:\n"
-    "alter table channels add column if not exists member_limit bigint;\n"
-    "alter table channels add column if not exists quota_done boolean not null default false;"
-)
-MAX_MEMBER_LIMIT = 100_000_000
-QUOTA_CHECK_INTERVAL_SECONDS = 10.0  # حداقل فاصله‌ی بین دو دور بررسی تعرفه‌ها (برای جلوگیری از فشار روی API تلگرام)
-
-_quota_bot = None                    # در شروع برنامه مقدار می‌گیرد (برای شمارش اعضا از داخل list_items)
-_quota_lock = asyncio.Lock()
-_quota_last_check = 0.0
-
-
-def item_member_limit(item: dict) -> int:
-    """سقف تعداد ممبر آیتم؛ 0 یعنی نامحدود."""
-    try:
-        return max(int(item.get("member_limit") or 0), 0)
-    except (TypeError, ValueError):
-        return 0
-
-
-def format_quota(item: dict, joined: Optional[int]) -> str:
-    limit = item_member_limit(item)
-    if limit <= 0:
-        # نامحدود: تعداد ورودی‌ها همچنان نمایش داده می‌شود
-        return f"{format_count(joined)} / نامحدود"
-    return f"{format_count(joined)} / {limit:,}"
-
-
-async def set_item_quota(item_id: int, limit: int, baseline: Optional[int]) -> Optional[str]:
-    """
-    ثبت تعرفه‌ی ممبر. limit=0 یعنی نامحدود.
-    با هر ثبت، شمارش از همین لحظه شروع می‌شود (baseline = تعداد فعلی اعضا) و وضعیت «تکمیل‌شده» ریست می‌شود.
-    در صورت خطا متن خطا را برمی‌گرداند.
-    """
-    payload: dict = {"member_limit": limit, "quota_done": False}
-    if limit > 0 and baseline is not None:
-        payload["start_members"] = baseline
-
-    def _run():
-        supabase.table("channels").update(payload).eq("id", item_id).execute()
-
-    try:
-        await asyncio.to_thread(_run)
-        _cache_clear()
-        _member_count_cache.clear()
-        return None
-    except Exception as exc:  # noqa: BLE001
-        logger.error("خطای دیتابیس هنگام ثبت تعرفه‌ی ممبر: %s", exc)
-        if "member_limit" in str(exc) or "quota_done" in str(exc):
-            return MEMBER_LIMIT_MISSING_HINT
-        return str(exc)
-
-
-async def _mark_quota_done(item: dict) -> None:
-    item["quota_done"] = True  # روی همان دیکشنری کش‌شده، تا بلافاصله اعمال شود
-
-    def _run():
-        supabase.table("channels").update({"quota_done": True}).eq("id", item["id"]).execute()
-
-    await asyncio.to_thread(_safe_db, _run, None)
-    _cache_clear()
-    logger.info("تعرفه‌ی ممبر «%s» کامل شد و از جوین اجباری کنار رفت.", item.get("title"))
-
-
-async def _enforce_quotas(items: list) -> None:
-    """آیتم‌هایی که تعداد ورودی‌هایشان به سقف رسیده را برای همیشه از جوین اجباری کنار می‌گذارد."""
-    global _quota_last_check
-    if _quota_bot is None:
-        return
-    pending = [
-        it for it in items
-        if item_member_limit(it) > 0 and not it.get("queued") and not it.get("quota_done") and not item_is_expired(it)
-    ]
-    if not pending:
-        return
-    if time.monotonic() - _quota_last_check < QUOTA_CHECK_INTERVAL_SECONDS:
-        return
-    async with _quota_lock:
-        if time.monotonic() - _quota_last_check < QUOTA_CHECK_INTERVAL_SECONDS:
-            return
-        _quota_last_check = time.monotonic()
-        counts = await asyncio.gather(
-            *(fetch_member_count(_quota_bot, it, force=True) for it in pending), return_exceptions=True
-        )
-        for it, joined in zip(pending, counts):
-            if isinstance(joined, Exception) or joined is None:
-                continue
-            if joined >= item_member_limit(it):
-                await _mark_quota_done(it)
-
-
-_PERSIAN_DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
-_DURATION_RE = re.compile(
-    r"(\d+)\s*(m|min|mins|minute|minutes|دقیقه|h|hr|hrs|hour|hours|ساعت|d|day|days|روز)?"
-)
-
-
-def parse_duration(text: str) -> Optional[timedelta]:
-    """مثال‌ها: 30m ، 12h ، 7d ، 90 دقیقه ، 2 روز ، فقط عدد = ساعت."""
-    match = _DURATION_RE.fullmatch(text.translate(_PERSIAN_DIGITS).strip().lower())
-    if not match:
-        return None
-    amount = int(match.group(1))
-    unit = match.group(2) or "h"
-    if unit.startswith(("m", "دقیقه")):
-        delta = timedelta(minutes=amount)
-    elif unit.startswith(("d", "روز")):
-        delta = timedelta(days=amount)
-    else:
-        delta = timedelta(hours=amount)
-    if delta <= timedelta(0) or delta > timedelta(days=3650):
-        return None
-    return delta
-
-
-async def get_text(key: str, default: str) -> str:
-    hit, cached = _cache_get(f"text:{key}")
+async def list_effective_items(group_id: int) -> list:
+    """آیتم‌های سراسری + آیتم‌های همین گروه (برای اجرای جوین اجباری)."""
+    key = f"effective_items:{group_id}"
+    hit, cached = _cache_get(key)
     if hit:
         return cached
 
     def _run():
-        res = supabase.table("texts").select("value").eq("key", key).execute()
-        value = res.data[0]["value"] if res.data else default
-        _cache_put(f"text:{key}", value)
-        return value
+        res = (
+            supabase.table("items")
+            .select("*")
+            .or_(f"group_id.is.null,group_id.eq.{group_id}")
+            .order("id")
+            .execute()
+        )
+        items = res.data or []
+        _cache_put(key, items)
+        return items
 
-    return await asyncio.to_thread(_safe_db, _run, default)
+    return await asyncio.to_thread(_safe_db, _run, [])
 
 
-async def set_text(key: str, value: str) -> Optional[str]:
+async def get_item(item_id: int) -> Optional[dict]:
     def _run():
-        supabase.table("texts").upsert({"key": key, "value": value}).execute()
+        res = supabase.table("items").select("*").eq("id", item_id).execute()
+        return res.data[0] if res.data else None
 
-    try:
-        await asyncio.to_thread(_run)
-        _cache_clear()
-        return None
-    except Exception as exc:  # noqa: BLE001
-        logger.error("خطای دیتابیس هنگام ذخیره متن: %s", exc)
-        return str(exc)
+    return await asyncio.to_thread(_safe_db, _run, None)
+
+
+async def get_item_by_chat_id_in_scope(scope: str, chat_id: str) -> Optional[dict]:
+    for it in await list_scope_items(scope):
+        if str(it["chat_id"]) == str(chat_id):
+            return it
+    return None
 
 
 async def has_started_bot(bot_username: str, user_id: int) -> bool:
@@ -547,19 +374,6 @@ async def has_started_bot(bot_username: str, user_id: int) -> bool:
     return await asyncio.to_thread(_safe_db, _run, False)
 
 
-async def count_bot_starts(bot_username: str) -> int:
-    def _run():
-        res = (
-            supabase.table("bot_starts")
-            .select("user_id", count="exact")
-            .eq("bot_username", bot_username.lower())
-            .execute()
-        )
-        return res.count or 0
-
-    return await asyncio.to_thread(_safe_db, _run, 0)
-
-
 async def record_bot_start(bot_username: str, user_id: int) -> None:
     def _run():
         supabase.table("bot_starts").upsert(
@@ -570,7 +384,7 @@ async def record_bot_start(bot_username: str, user_id: int) -> None:
 
 
 # ---------------------------------------------------------------------------
-# ابزارهای کمکی
+# ابزارهای کمکی متن/کیبورد
 # ---------------------------------------------------------------------------
 
 
@@ -582,10 +396,7 @@ def render_mention(user: User) -> str:
 
 
 def render_template(template: str, user: User) -> str:
-    """
-    جایگزینی متغیرها در متن سفارشی ادمین.
-    متغیرهای پشتیبانی‌شده: {mention} و منشن_کاربر (فرمت فارسی)
-    """
+    """جایگزینی متغیرها در متن سفارشی مالک گروه. متغیرها: {mention} و منشن_کاربر"""
     mention = render_mention(user)
     text = template.replace("{mention}", mention)
     text = text.replace("منشن_کاربر", mention)
@@ -605,8 +416,10 @@ def build_items_list_text(items: list) -> str:
     return "<blockquote>" + "\n".join(lines) + "</blockquote>"
 
 
-async def build_full_warn_text(user: User, items: list, use_default: bool = False) -> str:
-    intro_template = DEFAULT_WARN_TEXT if use_default else await get_text("warn_text", DEFAULT_WARN_TEXT)
+async def build_full_warn_text(group: Optional[dict], user: User, items: list, use_default: bool = False) -> str:
+    intro_template = DEFAULT_WARN_TEXT
+    if not use_default and group and group.get("warn_text"):
+        intro_template = group["warn_text"]
     intro = render_template(intro_template, user)
     items_text = build_items_list_text(items)
     if items_text:
@@ -619,7 +432,13 @@ def build_items_keyboard(items: list, user_id: int) -> InlineKeyboardMarkup:
     for it in items:
         icon = KIND_ICON.get(it.get("kind", "channel"), "📢")
         rows.append([InlineKeyboardButton(text=f"{icon} {it['title']}", url=it["invite_link"])])
+    rows.append([InlineKeyboardButton("🔄 بررسی عضویت", callback_data=f"check_membership_{user_id}")])
     return InlineKeyboardMarkup(rows)
+
+
+# ---------------------------------------------------------------------------
+# بررسی عضویت
+# ---------------------------------------------------------------------------
 
 
 async def _check_single_item(bot, item: dict, user_id: int) -> bool:
@@ -641,10 +460,8 @@ async def _check_single_item(bot, item: dict, user_id: int) -> bool:
         return False
 
 
-async def get_missing_items(bot, user_id: int, items: Optional[list] = None) -> list:
+async def get_missing_items(bot, user_id: int, items: list) -> list:
     """آیتم‌هایی که کاربر هنوز در آن‌ها عضو نیست (بررسی موازی)."""
-    if items is None:
-        items = await list_items()
     if not items:
         return []
     results = await asyncio.gather(*[_check_single_item(bot, it, user_id) for it in items])
@@ -653,70 +470,61 @@ async def get_missing_items(bot, user_id: int, items: Optional[list] = None) -> 
 
 MEMBERSHIP_OK_TTL_SECONDS = 180.0   # کاربری که همه‌چیز را کامل دارد: ۳ دقیقه دوباره چک نمی‌شود
 MEMBERSHIP_MISS_TTL_SECONDS = 8.0   # کاربر ناقص: فقط برای هجوم پیام‌های هم‌زمان کش می‌شود
-_membership_cache: dict = {}        # user_id -> (زمان، مجموعه‌ی id آیتم‌های ناقص)
-_membership_inflight: dict = {}     # user_id -> تسک در حال اجرای بررسی
+# کلید: (group_chat_id, user_id)
+_membership_cache: dict = {}
+_membership_inflight: dict = {}
 
 
-def store_membership(user_id: int, missing: list) -> None:
-    if len(_membership_cache) > 5000:
+def store_membership(group_chat_id: int, user_id: int, missing: list) -> None:
+    key = (group_chat_id, user_id)
+    if len(_membership_cache) > 8000:
         _membership_cache.clear()
-    _membership_cache[user_id] = (time.monotonic(), {it["id"] for it in missing})
+    _membership_cache[key] = (time.monotonic(), {it["id"] for it in missing})
 
 
-async def get_missing_items_fast(bot, user_id: int, items: list) -> list:
+async def get_missing_items_fast(bot, group_chat_id: int, user_id: int, items: list) -> list:
     """
     نسخه‌ی سریع برای پیام‌های گروه: نتیجه‌ی اخیر را از کش می‌خواند و اگر چند پیام هم‌زمان
     از یک کاربر برسد، فقط یک بار get_chat_member می‌زند و همه از همان نتیجه استفاده می‌کنند.
     """
-    hit = _membership_cache.get(user_id)
+    key = (group_chat_id, user_id)
+    hit = _membership_cache.get(key)
     if hit is not None:
         ts, missing_ids = hit
         ttl = MEMBERSHIP_MISS_TTL_SECONDS if missing_ids else MEMBERSHIP_OK_TTL_SECONDS
         if time.monotonic() - ts < ttl:
             return [it for it in items if it["id"] in missing_ids]
 
-    task = _membership_inflight.get(user_id)
+    task = _membership_inflight.get(key)
     if task is None:
         task = asyncio.ensure_future(get_missing_items(bot, user_id, items))
-        _membership_inflight[user_id] = task
+        _membership_inflight[key] = task
 
-        def _cleanup(t: asyncio.Future, uid: int = user_id) -> None:
-            if _membership_inflight.get(uid) is t:
-                _membership_inflight.pop(uid, None)
+        def _cleanup(t: asyncio.Future, k=key) -> None:
+            if _membership_inflight.get(k) is t:
+                _membership_inflight.pop(k, None)
 
         task.add_done_callback(_cleanup)
 
     missing = await asyncio.shield(task)
-    store_membership(user_id, missing)
+    store_membership(group_chat_id, user_id, missing)
     return missing
 
 
-async def is_member_of_all_items(bot, user_id: int) -> bool:
-    """بررسی موازی و سریع همه‌ی آیتم‌ها به‌جای حلقه‌ی ترتیبی."""
-    items = await list_items()
-    if not items:
-        return True
-    results = await asyncio.gather(*[_check_single_item(bot, it, user_id) for it in items])
-    return all(results)
+def is_owner(user_id: int) -> bool:
+    return user_id in SUPER_OWNER_IDS
 
 
-def is_admin(user_id: int) -> bool:
-    return user_id in ADMIN_IDS
-
-
-# حالت‌های موقت پیوی ادمین
-PENDING_TEXT_EDIT: dict = {}
-PENDING_ITEM_ADD: set = set()
-PENDING_BOT_ADD: set = set()
-PENDING_LINK_EDIT: dict = {}
-PENDING_ITEM_TIME: dict = {}   # user_id -> item_id (منتظر مدت زمان)
-PENDING_ITEM_QUOTA: dict = {}  # user_id -> (item_id، آیا بلافاصله بعد از افزودن است؟) منتظر تعداد ممبر
-PENDING_GROUP_SET: set = set()
-PENDING_DELETE_TIMER_SET: set = set()
+# حالت‌های موقت پیوی مدیریت (کلید: user_id)
+PENDING_TEXT_EDIT: dict = {}      # user_id -> (scope, key)
+PENDING_ITEM_ADD: dict = {}       # user_id -> scope
+PENDING_BOT_ADD: dict = {}        # user_id -> scope
+PENDING_LINK_EDIT: dict = {}      # user_id -> item_id
+PENDING_DELETE_TIMER: dict = {}   # user_id -> scope (همیشه یک گروه واقعی)
 
 
 async def _delete_message_after(bot, chat_id: int, message_id: int, delay: float, user_id: Optional[int] = None) -> None:
-    """بعد از delay ثانیه، پیام هشدار را پاک می‌کند و به کاربر اجازه می‌دهد اگر هنوز عضو نیست، هشدار جدید بگیرد."""
+    """بعد از delay ثانیه، پیام هشدار را پاک می‌کند تا کاربر در صورت نیاز هشدار جدید بگیرد."""
     if delay <= 0:
         return
     try:
@@ -728,32 +536,47 @@ async def _delete_message_after(bot, chat_id: int, message_id: int, delay: float
         logger.warning("خطا در حذف خودکار پیام هشدار: %s", exc)
     finally:
         if user_id is not None:
-            active = _active_warn.get(user_id)
+            key = (chat_id, user_id)
+            active = _active_warn.get(key)
             if active is not None and active[0] == message_id:
-                _active_warn.pop(user_id, None)
+                _active_warn.pop(key, None)
+
+
+def _log_task_exception(task: asyncio.Task) -> None:
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error("خطای پردازش‌نشده در تسک: %s", exc, exc_info=exc)
+
 
 # ---------------------------------------------------------------------------
 # هندلرهای گروه
 # ---------------------------------------------------------------------------
 
+_warn_locks: dict = {}    # (chat_id, user_id) -> Lock
+_active_warn: dict = {}   # (chat_id, user_id) -> (message_id هشدار فعال، زمان انقضای اطمینان)
 
-_warn_locks: dict = {}    # user_id -> Lock (فقط یک هشدار هم‌زمان برای هر کاربر)
-_active_warn: dict = {}   # user_id -> (message_id هشدار فعال، زمان انقضای اطمینان، chat_id گروه)
+ANONYMOUS_ADMIN_BOT_ID = 1087968824       # GroupAnonymousBot: پیام ادمینِ ناشناس
+GROUP_STAFF_TTL_SECONDS = 1200.0
+_group_staff_cache: dict = {}             # (chat_id, user_id) -> (زمان، ادمین/مالک گروه است؟)
+_bot_warned_users: set = set()            # (chat_id, user_id) که فقط آیتم «ربات» برایشان مانده و هشدار گرفته‌اند
 
 
-def _get_warn_lock(user_id: int) -> asyncio.Lock:
-    if len(_warn_locks) > 2000:
-        for uid in [u for u, lk in _warn_locks.items() if not lk.locked()]:
-            _warn_locks.pop(uid, None)
-            _active_warn.pop(uid, None)
-    lock = _warn_locks.get(user_id)
+def _get_warn_lock(chat_id: int, user_id: int) -> asyncio.Lock:
+    key = (chat_id, user_id)
+    if len(_warn_locks) > 4000:
+        for k, lk in [(k, lk) for k, lk in _warn_locks.items() if not lk.locked()]:
+            _warn_locks.pop(k, None)
+            _active_warn.pop(k, None)
+    lock = _warn_locks.get(key)
     if lock is None:
-        lock = _warn_locks[user_id] = asyncio.Lock()
+        lock = _warn_locks[key] = asyncio.Lock()
     return lock
 
 
 async def delete_message_reliably(message, attempts: int = 5) -> bool:
-    """حذف پیام با تلاش مجدد روی محدودیت نرخ (RetryAfter) و خطای شبکه؛ قبلاً همین خطاها باعث می‌شد بعضی پیام‌ها پاک نشوند."""
+    """حذف پیام با تلاش مجدد روی محدودیت نرخ (RetryAfter) و خطای شبکه."""
     for attempt in range(attempts):
         try:
             await message.delete()
@@ -768,7 +591,7 @@ async def delete_message_reliably(message, attempts: int = 5) -> bool:
             await asyncio.sleep(0.3 * (attempt + 1))
         except BadRequest as exc:
             if "not found" in str(exc).lower():
-                return True  # قبلاً حذف شده
+                return True
             logger.warning("عدم امکان حذف پیام: %s", exc)
             return False
         except Forbidden as exc:
@@ -778,18 +601,16 @@ async def delete_message_reliably(message, attempts: int = 5) -> bool:
     return False
 
 
-ANONYMOUS_ADMIN_BOT_ID = 1087968824       # GroupAnonymousBot: پیام ادمینِ ناشناس
-GROUP_STAFF_TTL_SECONDS = 1200.0
-_group_staff_cache: dict = {}             # user_id -> (زمان، ادمین/مالک گروه است؟)
-_bot_warned_users: set = set()            # کاربرانی که فقط آیتم «ربات» برایشان مانده و هشدار گرفته‌اند
-
-
 async def is_group_staff(bot, chat_id: int, user_id: int) -> bool:
-    """ادمین‌های ربات و ادمین/مالک گروه (با کش ۲ دقیقه‌ای)."""
-    if is_admin(user_id) or user_id == ANONYMOUS_ADMIN_BOT_ID:
+    """مالک اصلی ربات، مالک گروه و ادمین/مالک واقعی گروه در تلگرام (با کش)."""
+    if is_owner(user_id) or user_id == ANONYMOUS_ADMIN_BOT_ID:
         return True
+    group = await get_group(chat_id)
+    if group and group.get("owner_id") == user_id:
+        return True
+    key = (chat_id, user_id)
     now = time.monotonic()
-    hit = _group_staff_cache.get(user_id)
+    hit = _group_staff_cache.get(key)
     if hit and now - hit[0] < GROUP_STAFF_TTL_SECONDS:
         return hit[1]
     try:
@@ -798,9 +619,9 @@ async def is_group_staff(bot, chat_id: int, user_id: int) -> bool:
     except (BadRequest, Forbidden, TimedOut, NetworkError) as exc:
         logger.warning("بررسی ادمین بودن کاربر %s ممکن نبود: %s", user_id, exc)
         return False
-    if len(_group_staff_cache) > 5000:
+    if len(_group_staff_cache) > 8000:
         _group_staff_cache.clear()
-    _group_staff_cache[user_id] = (now, staff)
+    _group_staff_cache[key] = (now, staff)
     return staff
 
 
@@ -812,49 +633,44 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if user is None or user.is_bot or message is None:
         return
 
-    group_id = await get_group_id()
-    if group_id is None or chat.id != group_id:
-        return  # ربات فقط در گروه تعیین‌شده توسط ادمین فعال است
-
     if message.sender_chat is not None:
-        return  # ادمینِ ناشناس (پیام به نام گروه) یا پست کانالِ متصل: هیچ‌وقت بررسی نمی‌شود
+        return  # ادمینِ ناشناس یا پست کانالِ متصل: هیچ‌وقت بررسی نمی‌شود
     if await is_group_staff(context.bot, chat.id, user.id):
-        return  # مالک و ادمین‌های گروه/ربات: پیام‌هایشان خوانده و حذف نمی‌شود
+        return
 
-    items = await list_items()
+    items = await list_effective_items(chat.id)
     if not items:
-        return  # هیچ آیتمی تنظیم نشده، محدودیتی اعمال نمی‌شود
+        return
 
-    missing = await get_missing_items_fast(context.bot, user.id, items)
+    missing = await get_missing_items_fast(context.bot, chat.id, user.id, items)
     if not missing:
         return
 
+    warn_key = (chat.id, user.id)
     bot_only_missing = all(it.get("kind") == "bot" for it in missing)
-    if bot_only_missing and user.id in _bot_warned_users:
-        # بررسی واقعی ورود به ربات ممکن نیست؛ بدون دکمه‌ی تایید، پیام بعد از هشدار = تایید خودکار
-        _bot_warned_users.discard(user.id)
+    if bot_only_missing and warn_key in _bot_warned_users:
+        _bot_warned_users.discard(warn_key)
         await asyncio.gather(*[record_bot_start(it["chat_id"], user.id) for it in missing])
-        _membership_cache.pop(user.id, None)
+        _membership_cache.pop(warn_key, None)
         return
 
-    # حذف پیام و ارسال هشدار به هم وابسته نیستند؛ هم‌زمان اجرا می‌شوند تا هشدار
-    # منتظر تمام‌شدنِ حذف نماند (یک رفت‌وبرگشتِ شبکه کمتر تا دیدنِ هشدار توسط کاربر).
     delete_task = asyncio.create_task(delete_message_reliably(message))
     delete_task.add_done_callback(_log_task_exception)
 
-    delay = await get_warn_delete_seconds()
+    group = await get_group(chat.id)
+    delay = await get_warn_delete_seconds(group)
 
-    async with _get_warn_lock(user.id):
-        active = _active_warn.get(user.id)
+    async with _get_warn_lock(chat.id, user.id):
+        active = _active_warn.get(warn_key)
         if active is not None:
             if time.monotonic() < active[1]:
-                return  # هشدار این کاربر هنوز در گروه است؛ پیام‌ها فقط پاک می‌شوند، هشدار تکراری نمی‌رود
-            _active_warn.pop(user.id, None)  # حالت اطمینان: انقضا (مثلاً تسک حذف از بین رفته)
+                return  # هشدار این کاربر هنوز در گروه است؛ پیام‌ها فقط پاک می‌شوند
+            _active_warn.pop(warn_key, None)
 
         keyboard = build_items_keyboard(missing, user.id)
         warn_msg = None
         for use_default in (False, True):
-            text = await build_full_warn_text(user, missing, use_default=use_default)
+            text = await build_full_warn_text(group, user, missing, use_default=use_default)
             try:
                 warn_msg = await context.bot.send_message(
                     chat_id=chat.id,
@@ -888,12 +704,11 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         if warn_msg is None:
             return
         if bot_only_missing:
-            if len(_bot_warned_users) > 5000:
+            if len(_bot_warned_users) > 8000:
                 _bot_warned_users.clear()
-            _bot_warned_users.add(user.id)
-        # با حذف پیام هشدار (بعد از تایمر) این وضعیت آزاد می‌شود و پیام بعدیِ کاربر هشدار جدید می‌گیرد
+            _bot_warned_users.add(warn_key)
         expires_in = delay + 15.0 if delay > 0 else 3600.0
-        _active_warn[user.id] = (warn_msg.message_id, time.monotonic() + expires_in, chat.id)
+        _active_warn[warn_key] = (warn_msg.message_id, time.monotonic() + expires_in)
 
     if delay > 0:
         task = asyncio.create_task(
@@ -904,12 +719,15 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 async def _edit_warning_message(bot, chat_id: int, message_id: int, user: User, missing: list) -> None:
     """پیام هشدار را ادیت می‌کند: اگر چیزی باقی نمانده متن تایید عضویت، وگرنه فقط موارد باقی‌مانده."""
+    group = await get_group(chat_id)
     for use_default in (False, True):
         if missing:
-            text = await build_full_warn_text(user, missing, use_default=use_default)
+            text = await build_full_warn_text(group, user, missing, use_default=use_default)
             markup = build_items_keyboard(missing, user.id)
         else:
-            template = DEFAULT_JOINED_TEXT if use_default else await get_text("joined_text", DEFAULT_JOINED_TEXT)
+            template = DEFAULT_JOINED_TEXT
+            if not use_default and group and group.get("joined_text"):
+                template = group["joined_text"]
             text = render_template(template, user)
             markup = None
         try:
@@ -933,29 +751,17 @@ async def _edit_warning_message(bot, chat_id: int, message_id: int, user: User, 
 
 async def on_chat_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    تایید خودکار: وقتی کاربر در یکی از کانال‌ها/گروه‌های جوین اجباری عضو می‌شود، بدون زدن «بررسی عضویت»
-    پیام هشدارش ادیت می‌شود (دکمه‌ی همان مورد حذف می‌شود، و اگر همه کامل بود متن تایید عضویت می‌آید).
+    تایید خودکار: وقتی کاربر در یکی از کانال‌ها/گروه‌های جوین اجباری عضو می‌شود، بدون زدن
+    «بررسی عضویت» پیام هشدارش در هر گروهی که هشدار فعال دارد ادیت می‌شود.
     ربات باید در آن کانال/گروه ادمین باشد تا تلگرام رویداد chat_member را بفرستد.
     """
     cmu = update.chat_member
     if cmu is None:
         return
-
     member = cmu.new_chat_member
     user = member.user
     if user.is_bot:
         return
-
-    global _quota_last_check
-    chat_key = str(cmu.chat.id)
-    # آیتم ممکن است با همین ورود به سقف تعرفه برسد و از list_items بیرون برود؛ پس اول روی همه‌ی آیتم‌ها چک می‌کنیم
-    if not any(it.get("kind") != "bot" and str(it["chat_id"]) == chat_key for it in await list_all_items()):
-        return
-
-    _quota_last_check = 0.0  # با هر ورود جدید، بررسی تعرفه بلافاصله انجام شود
-    items = await list_items()
-
-    _membership_cache.pop(user.id, None)
 
     joined = member.status in (
         ChatMemberStatus.MEMBER,
@@ -965,35 +771,38 @@ async def on_chat_member_update(update: Update, context: ContextTypes.DEFAULT_TY
     if not joined:
         return
 
-    async with _get_warn_lock(user.id):
-        real_items = [it for it in items if it.get("kind") != "bot"]
-        bot_items = [it for it in items if it.get("kind") == "bot"]
+    # این کاربر در کدام گروه‌ها الان هشدار فعال دارد؟ (فقط همین‌ها را بررسی می‌کنیم، نه کل دیتابیس)
+    affected = [key for key in list(_active_warn.keys()) if key[1] == user.id]
+    if not affected:
+        return
 
-        # هر آیتم واقعی فقط یک‌بار به تلگرام چک می‌شود (نه دوبار)؛ نتیجه برای هر دو تصمیم
-        # (تایید خودکار ربات‌ها و ساخت لیست نهایی) از همین یک درخواست استفاده می‌شود.
-        missing_real = await get_missing_items(context.bot, user.id, real_items)
-        missing_bot: list = []
-        if bot_items:
-            if not missing_real:
-                # کانال/گروه‌ها کامل شد → ورود به ربات‌ها هم خودکار تایید می‌شود (بررسی واقعی برای ربات ممکن نیست)
-                await asyncio.gather(*[record_bot_start(it["chat_id"], user.id) for it in bot_items])
-            else:
-                missing_bot = await get_missing_items(context.bot, user.id, bot_items)
+    for chat_id, uid in affected:
+        async with _get_warn_lock(chat_id, uid):
+            active = _active_warn.get((chat_id, uid))
+            if active is None:
+                continue
+            message_id, _expires = active
+            items = await list_effective_items(chat_id)
+            real_items = [it for it in items if it.get("kind") != "bot"]
+            bot_items = [it for it in items if it.get("kind") == "bot"]
 
-        missing = missing_real + missing_bot
-        store_membership(user.id, missing)
+            missing_real = await get_missing_items(context.bot, uid, real_items)
+            missing_bot: list = []
+            if bot_items:
+                if not missing_real:
+                    await asyncio.gather(*[record_bot_start(it["chat_id"], uid) for it in bot_items])
+                else:
+                    missing_bot = await get_missing_items(context.bot, uid, bot_items)
 
-        active = _active_warn.get(user.id)
-        if active is None:
-            return
-        message_id, _expires, warn_chat_id = active
-        await _edit_warning_message(context.bot, warn_chat_id, message_id, user, missing)
-        if not missing:
-            _active_warn.pop(user.id, None)
+            missing = missing_real + missing_bot
+            store_membership(chat_id, uid, missing)
+            await _edit_warning_message(context.bot, chat_id, message_id, user, missing)
+            if not missing:
+                _active_warn.pop((chat_id, uid), None)
 
 
 async def _guard_button_owner(query, owner_part: str) -> bool:
-    """دکمه‌های پیام هشدار فقط برای کاربرِ هدفِ پیام فعال هستند. دکمه‌های قدیمی (بدون آیدی) رد نمی‌شوند."""
+    """دکمه‌های پیام هشدار فقط برای کاربرِ هدفِ پیام فعال هستند."""
     if owner_part.isdigit() and int(owner_part) != query.from_user.id:
         await query.answer("این دکمه برای شما نیست، پیام خودتان را بفرستید.", show_alert=True)
         return False
@@ -1003,29 +812,29 @@ async def _guard_button_owner(query, owner_part: str) -> bool:
 async def on_check_membership(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     user = query.from_user
+    chat = update.effective_chat  # همان گروهی که دکمه در آن کلیک شده
 
     if not await _guard_button_owner(query, query.data.rpartition("_")[2]):
         return
 
     try:
-        # ربات‌ها بررسی ندارند: زدن دکمه‌ی «بررسی عضویت» = تایید ورود به همه‌ی ربات‌ها
-        all_items = await list_items()
+        items = await list_effective_items(chat.id)
         await asyncio.gather(
-            *[record_bot_start(it["chat_id"], user.id) for it in all_items if it.get("kind") == "bot"]
+            *[record_bot_start(it["chat_id"], user.id) for it in items if it.get("kind") == "bot"]
         )
-        missing = await get_missing_items(context.bot, user.id, all_items)
-        store_membership(user.id, missing)
+        missing = await get_missing_items(context.bot, user.id, items)
+        store_membership(chat.id, user.id, missing)
         if not missing:
-            _active_warn.pop(user.id, None)
+            _active_warn.pop((chat.id, user.id), None)
     except Exception as exc:  # noqa: BLE001
         logger.error("خطا در بررسی عضویت: %s", exc)
         await query.answer("خطای موقت، دوباره تلاش کنید.", show_alert=True)
         return
 
     if missing:
-        # فقط موارد باقی‌مانده نمایش داده می‌شود؛ دکمه‌ی مواردی که عضو شده حذف می‌شود
+        group = await get_group(chat.id)
         for use_default in (False, True):
-            text = await build_full_warn_text(user, missing, use_default=use_default)
+            text = await build_full_warn_text(group, user, missing, use_default=use_default)
             try:
                 await query.edit_message_text(
                     text=text,
@@ -1043,9 +852,12 @@ async def on_check_membership(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.answer("هنوز در همه‌ی موارد عضو نشده‌اید ❌", show_alert=True)
         return
 
+    group = await get_group(chat.id)
     for use_default in (False, True):
-        joined_template = DEFAULT_JOINED_TEXT if use_default else await get_text("joined_text", DEFAULT_JOINED_TEXT)
-        text = render_template(joined_template, user)
+        template = DEFAULT_JOINED_TEXT
+        if not use_default and group and group.get("joined_text"):
+            template = group["joined_text"]
+        text = render_template(template, user)
         try:
             await query.edit_message_text(text=text, parse_mode=ParseMode.HTML)
             break
@@ -1056,129 +868,141 @@ async def on_check_membership(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 # ---------------------------------------------------------------------------
-# پنل مدیریت ادمین (پیوی ربات)
+# ثبت خودکار گروه هنگام افزودن ربات
 # ---------------------------------------------------------------------------
 
-MAIN_MENU = InlineKeyboardMarkup(
-    [
-        [InlineKeyboardButton("🏠 تنظیم گروه", callback_data="menu_set_group", style="primary")],
-        [InlineKeyboardButton("📋 مدیریت آیتم‌ها", callback_data="menu_channels", style="primary")],
-        [InlineKeyboardButton("✏️ ویرایش متن‌ها", callback_data="menu_texts", style="primary")],
-        [InlineKeyboardButton("⏱ زمان حذف پیام هشدار", callback_data="menu_delete_timer", style="primary")],
-        [InlineKeyboardButton("ℹ️ وضعیت فعلی", callback_data="menu_status", style="success")],
-    ]
-)
 
-CHANNELS_MENU = InlineKeyboardMarkup(
-    [
-        [InlineKeyboardButton("➕ افزودن کانال/گروه", callback_data="ch_add", style="success")],
-        [InlineKeyboardButton("🤖 افزودن ربات", callback_data="ch_add_bot", style="success")],
-        [InlineKeyboardButton("📋 لیست کانال‌ها", callback_data="ch_list", style="primary")],
-        [InlineKeyboardButton("🔙 بازگشت", callback_data="menu_main")],
-    ]
-)
+async def on_bot_membership_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """وقتی ربات به گروهی اضافه/ادمین می‌شود، همان کاربر به‌عنوان مالک آن گروه ثبت می‌شود."""
+    cmu = update.my_chat_member
+    if cmu is None:
+        return
+    chat = cmu.chat
+    if chat.type not in (Chat.GROUP, Chat.SUPERGROUP):
+        return
 
-TEXTS_MENU = InlineKeyboardMarkup(
-    [
-        [InlineKeyboardButton("✏️ ویرایش متن هشدار", callback_data="txt_warn", style="primary")],
-        [InlineKeyboardButton("✏️ ویرایش متن تایید عضویت", callback_data="txt_joined", style="primary")],
-        [InlineKeyboardButton("🔙 بازگشت", callback_data="menu_main")],
-    ]
-)
+    new_status = cmu.new_chat_member.status
+    if new_status not in (ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR):
+        return  # ربات حذف/خارج/بن شده: چیزی برای ثبت نیست
 
+    actor = cmu.from_user
+    await upsert_group_owner(chat.id, actor.id, chat.title or str(chat.id))
 
-def build_schedule_keyboard(item_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton("⚡ تنظیم هم اکنون", callback_data=f"ch_now_{item_id}", style="success"),
-                InlineKeyboardButton("⏰ تنظیم زمان", callback_data=f"ch_time_{item_id}", style="primary"),
-            ],
-            [InlineKeyboardButton("🔙 بازگشت", callback_data="menu_channels")],
-        ]
+    note = (
+        f"ربات «{BOT_DISPLAY_NAME}» به گروه «{html.escape(chat.title or '')}» اضافه شد ✅\n"
+        "برای تنظیم جوین اجباریِ این گروه (افزودن کانال/گروه/ربات، متن‌ها و زمان حذف پیام)، "
+        "به پیوی همین ربات بیایید و /start را بزنید.\n\n"
+        "نکته: برای اینکه ربات بتواند عضویت را در کانال/گروه‌های دیگر چک کند، باید در "
+        "آن‌ها هم ادمین باشد."
     )
+    try:
+        await context.bot.send_message(chat_id=actor.id, text=note, parse_mode=ParseMode.HTML)
+    except (BadRequest, Forbidden):
+        pass  # کاربر هنوز پیوی ربات را استارت نکرده؛ مشکلی نیست، از /start خودش می‌بیند
+
+
+# ---------------------------------------------------------------------------
+# پنل مدیریت (پیوی ربات)
+# ---------------------------------------------------------------------------
+
+MAIN_MENU_BUTTONS = [
+    [InlineKeyboardButton("👥 گروه‌های من", callback_data="mygroups")],
+]
+
+OWNER_EXTRA_BUTTONS = [
+    [InlineKeyboardButton("📡 آیتم‌های سراسری (همه‌ی گروه‌ها)", callback_data="global")],
+    [InlineKeyboardButton("🗂 همه‌ی گروه‌های ربات", callback_data="allgroups")],
+]
+
+
+def main_menu_kb(user_id: int) -> InlineKeyboardMarkup:
+    rows = list(MAIN_MENU_BUTTONS)
+    if is_owner(user_id):
+        rows += OWNER_EXTRA_BUTTONS
+    return InlineKeyboardMarkup(rows)
 
 
 def back_kb(callback_data: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data=callback_data)]])
 
 
-MEMBER_COUNT_TTL_SECONDS = 45.0
-_member_count_cache: dict = {}  # chat_id -> (زمان، تعداد)
+def scope_panel_kb(scope: str) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton("📋 مدیریت آیتم‌ها", callback_data=f"g:{scope}:channels")]]
+    if scope != GLOBAL_SCOPE:
+        rows += [
+            [InlineKeyboardButton("✏️ ویرایش متن‌ها", callback_data=f"g:{scope}:texts")],
+            [InlineKeyboardButton("⏱ زمان حذف پیام هشدار", callback_data=f"g:{scope}:timer")],
+        ]
+    rows.append([InlineKeyboardButton("🔙 بازگشت", callback_data="menu_main")])
+    return InlineKeyboardMarkup(rows)
 
 
-def format_count(count: Optional[int]) -> str:
-    return f"{count:,}" if isinstance(count, int) else "—"
+def channels_menu_kb(scope: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("➕ افزودن کانال/گروه", callback_data=f"g:{scope}:ch_add")],
+            [InlineKeyboardButton("🤖 افزودن ربات", callback_data=f"g:{scope}:ch_add_bot")],
+            [InlineKeyboardButton("📋 لیست آیتم‌ها", callback_data=f"g:{scope}:ch_list")],
+            [InlineKeyboardButton("🔙 بازگشت", callback_data=f"g:{scope}:panel")],
+        ]
+    )
 
 
-async def _save_start_members(item_id: int, value: int) -> None:
-    def _run():
-        supabase.table("channels").update({"start_members": value}).eq("id", item_id).execute()
-
-    await asyncio.to_thread(_safe_db, _run, None)
-    _cache_clear()
-
-
-async def fetch_member_count(bot, item: dict, force: bool = False) -> Optional[int]:
-    """تعداد کاربرانی که از لحظه‌ی ثبت آیتم تا الان وارد شده‌اند = تعداد فعلی − تعداد اولیه. خطا = None."""
-    if item.get("queued"):
-        return None  # هنوز در صف است؛ مبنای شمارش موقع فعال‌سازی ثبت می‌شود
-    key = str(item["chat_id"])
-    now = time.monotonic()
-    hit = _member_count_cache.get(key)
-    if hit and not force and now - hit[0] < MEMBER_COUNT_TTL_SECONDS:
-        current = hit[1]
-    else:
-        try:
-            if item.get("kind") == "bot":
-                current = await count_bot_starts(item["chat_id"])
-            else:
-                current = await bot.get_chat_member_count(item["chat_id"])
-        except (BadRequest, Forbidden, TimedOut, NetworkError) as exc:
-            logger.warning("خطا در دریافت تعداد اعضای %s: %s", item.get("title"), exc)
-            if not hit:
-                return None
-            current = hit[1]
-        else:
-            _member_count_cache[key] = (now, current)
-
-    baseline = item.get("start_members")
-    if baseline is None:
-        # آیتم‌های قدیمی که مبنا ندارند: از همین لحظه شروع به شمارش می‌کنند
-        item["start_members"] = current
-        await _save_start_members(item["id"], current)
-        return 0
-    return max(0, current - baseline)
+def texts_menu_kb(scope: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("✏️ متن هشدار", callback_data=f"g:{scope}:txt_warn")],
+            [InlineKeyboardButton("✏️ متن تایید عضویت", callback_data=f"g:{scope}:txt_joined")],
+            [InlineKeyboardButton("🔙 بازگشت", callback_data=f"g:{scope}:panel")],
+        ]
+    )
 
 
-async def fetch_member_counts(bot, items: list, force: bool = False) -> dict:
-    counts = await asyncio.gather(*(fetch_member_count(bot, it, force=force) for it in items))
-    return {it["id"]: c for it, c in zip(items, counts)}
-
-
-def build_list_keyboard(items: list, counts: Optional[dict] = None) -> InlineKeyboardMarkup:
+def list_items_kb(scope: str, items: list) -> InlineKeyboardMarkup:
     rows = []
     for it in items:
-        icon = "⛔️" if item_is_expired(it) else ("⏳" if it.get("queued") else KIND_ICON.get(it.get("kind", "channel"), "📢"))
-        suffix = f"  •  👥 {format_quota(it, counts.get(it['id']))}" if counts is not None else ""
-        rows.append([InlineKeyboardButton(f"{icon} {it['title']}{suffix}", callback_data=f"ch_view_{it['id']}", style="primary")])
-    rows.append([InlineKeyboardButton("🔙 بازگشت", callback_data="menu_channels")])
+        icon = KIND_ICON.get(it.get("kind", "channel"), "📢")
+        rows.append([InlineKeyboardButton(f"{icon} {it['title']}", callback_data=f"g:{scope}:ch_view:{it['id']}")])
+    rows.append([InlineKeyboardButton("🔙 بازگشت", callback_data=f"g:{scope}:channels")])
     return InlineKeyboardMarkup(rows)
 
 
-def build_item_manage_keyboard(item: dict, count: Optional[int] = None) -> InlineKeyboardMarkup:
-    rows = [
+def item_manage_kb(scope: str, item: dict) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
         [
-            InlineKeyboardButton("⚡ تنظیم هم اکنون", callback_data=f"ch_now_{item['id']}", style="success"),
-            InlineKeyboardButton("⏰ تنظیم زمان", callback_data=f"ch_time_{item['id']}", style="primary"),
-        ],
-        [InlineKeyboardButton("✏️ تغییر لینک", callback_data=f"ch_editlink_{item['id']}", style="primary")],
-        [InlineKeyboardButton(f"👥 {format_quota(item, count)}", callback_data=f"ch_count_{item['id']}", style="primary")],
-        [InlineKeyboardButton("🎯 تعرفه‌ی ممبر", callback_data=f"ch_quota_{item['id']}", style="primary")],
-        [InlineKeyboardButton("🗑 حذف", callback_data=f"ch_del_{item['id']}", style="danger")],
-        [InlineKeyboardButton("🔙 بازگشت به لیست", callback_data="ch_list")],
-    ]
+            [InlineKeyboardButton("✏️ تغییر لینک", callback_data=f"g:{scope}:ch_editlink:{item['id']}")],
+            [InlineKeyboardButton("🗑 حذف", callback_data=f"g:{scope}:ch_del:{item['id']}")],
+            [InlineKeyboardButton("🔙 بازگشت به لیست", callback_data=f"g:{scope}:ch_list")],
+        ]
+    )
+
+
+def groups_list_kb(groups: list, back_data: str = "menu_main") -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(f"👥 {g.get('title') or g['id']}", callback_data=f"g:{g['id']}:panel")] for g in groups]
+    rows.append([InlineKeyboardButton("🔙 بازگشت", callback_data=back_data)])
     return InlineKeyboardMarkup(rows)
+
+
+ADD_ITEM_PROMPT = (
+    "برای افزودن <b>کانال</b> یا <b>گروه</b> (ربات باید ادمین آن باشد)، یکی از راه‌های زیر:\n\n"
+    "۱) فوروارد یک پیام از آن کانال/گروه\n"
+    "۲) ارسال مستقیم یوزرنیم: <code>@channel_username</code>\n"
+    "۳) ارسال مستقیم لینک عمومی: <code>https://t.me/channel_username</code>\n"
+    "۴) ارسال مستقیم آیدی عددی (اگر ربات از قبل عضو/ادمین آن است): <code>-1001234567890</code>\n\n"
+    "برای کانال/گروه <b>خصوصی</b> که فقط لینک دعوت (+…) دارید، لطفاً فوروارد کنید؛ "
+    "یا اگر آیدی عددی را می‌دانید:\n"
+    "<code>-1001234567890 | https://t.me/+AbCdEfGhIj</code>\n\n"
+    "اگر لینک ندارید ولی ربات ادمین است، فقط یوزرنیم/آیدی/فوروارد کافیست؛ لینک خودکار ساخته می‌شود."
+)
+
+ADD_BOT_PROMPT = (
+    "یکی از این‌ها را ارسال کنید:\n\n"
+    "۱) یوزرنیم ربات: <code>@id_bot</code>\n"
+    "۲) لینک ربات: <code>https://t.me/id_bot</code>\n"
+    "۳) لینک دعوت با پارامتر استارت: <code>https://t.me/id_bot?start=ref123</code>\n\n"
+    "دکمه‌ی این ربات یک لینک مستقیم است و کاربر با زدن آن به پیوی ربات هدایت می‌شود. "
+    "ورودش وقتی تایید می‌شود که «بررسی عضویت» را بزند. نیازی به تغییر در ربات مقصد نیست."
+)
 
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1186,434 +1010,263 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     user = update.effective_user
 
-    # اگر یکی از ربات‌های دیگرِ همین مجموعه هستید و کاربر عادی /start زده،
-    # این خط برای خودِ همین ربات هم ثبت می‌شود (در صورتی که این ربات خودش
-    # به‌عنوان آیتم «ربات» در جای دیگری استفاده شود).
     if user is not None and context.bot.username:
         await record_bot_start(context.bot.username, user.id)
 
-    if not is_admin(user.id):
-        await update.message.reply_text("این ربات برای مدیریت جوین اجباری گروه است.")
+    PENDING_ITEM_ADD.pop(user.id, None)
+    PENDING_BOT_ADD.pop(user.id, None)
+    PENDING_LINK_EDIT.pop(user.id, None)
+    PENDING_TEXT_EDIT.pop(user.id, None)
+    PENDING_DELETE_TIMER.pop(user.id, None)
+
+    my_groups = await list_groups_by_owner(user.id)
+    if is_owner(user.id) or my_groups:
+        await update.message.reply_text(
+            f"به پنل مدیریت «{BOT_DISPLAY_NAME}» خوش آمدید 👋", reply_markup=main_menu_kb(user.id)
+        )
         return
-    PENDING_ITEM_QUOTA.pop(user.id, None)
+
     await update.message.reply_text(
-        "به پنل مدیریت ربات جوین اجباری خوش آمدید 👋",
-        reply_markup=MAIN_MENU,
+        f"سلام! «{BOT_DISPLAY_NAME}» یک ربات رایگان و عمومیِ جوین اجباری است.\n\n"
+        "برای استفاده، ربات را به گروه خودتان اضافه و <b>ادمین</b> کنید؛ همان لحظه شما مالک "
+        "آن گروه در این ربات می‌شوید و با زدن دوباره‌ی /start اینجا می‌توانید جوین اجباری‌های "
+        "همان گروه را تنظیم کنید.",
+        parse_mode=ParseMode.HTML,
     )
 
 
 async def owner_panel_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """مدیریت کلیک‌های دکمه‌های پنل ادمین در پیوی."""
     query = update.callback_query
     user_id = query.from_user.id
-
-    if not is_admin(user_id):
-        await query.answer("شما ادمین ربات نیستید.", show_alert=True)
-        return
-
     data = query.data
     await query.answer()
 
-    if not data.startswith("ch_time_"):
-        PENDING_ITEM_TIME.pop(user_id, None)
-    if not data.startswith("ch_quota_"):
-        PENDING_ITEM_QUOTA.pop(user_id, None)
-
+    # ---- مسیرهای ثابت ----
     if data == "menu_main":
-        await query.edit_message_text("پنل مدیریت:", reply_markup=MAIN_MENU)
+        await query.edit_message_text(f"پنل مدیریت «{BOT_DISPLAY_NAME}»:", reply_markup=main_menu_kb(user_id))
+        return
 
-    elif data == "menu_set_group":
-        PENDING_GROUP_SET.add(user_id)
-        await query.edit_message_text(
-            "ربات را در گروه مورد نظر ادمین کنید.\n\n"
-            "روش مطمئن: آیدی عددی گروه را مستقیماً اینجا ارسال کنید، مثل: "
-            "<code>-1001234567890</code>\n\n"
-            "(یا پیامی که توسط «ادمین ناشناس» در گروه ارسال شده را فوروارد کنید.)",
-            parse_mode=ParseMode.HTML,
-            reply_markup=back_kb("menu_main"),
-        )
-
-    elif data == "menu_channels":
-        await query.edit_message_text("مدیریت آیتم‌های جوین اجباری:", reply_markup=CHANNELS_MENU)
-
-    elif data == "ch_add":
-        PENDING_ITEM_ADD.add(user_id)
-        await query.edit_message_text(
-            "برای افزودن <b>کانال</b> یا <b>گروه</b> (ربات باید ادمین آن باشد)، یکی از راه‌های زیر:\n\n"
-            "۱) فوروارد یک پیام از آن کانال/گروه\n"
-            "۲) ارسال مستقیم یوزرنیم: <code>@channel_username</code>\n"
-            "۳) ارسال مستقیم لینک عمومی: <code>https://t.me/channel_username</code>\n"
-            "۴) ارسال مستقیم آیدی عددی (اگر ربات از قبل عضو/ادمین آن است): <code>-1001234567890</code>\n\n"
-            "برای کانال/گروه <b>خصوصی</b> که فقط لینک دعوت (+…) دارید، لطفاً فوروارد کنید؛ "
-            "یا اگر آیدی عددی را می‌دانید:\n"
-            "<code>-1001234567890 | https://t.me/+AbCdEfGhIj</code>\n\n"
-            "اگر لینک ندارید ولی ربات ادمین است، فقط یوزرنیم/آیدی/فوروارد کافیست؛ لینک خودکار ساخته می‌شود.",
-            parse_mode=ParseMode.HTML,
-            reply_markup=back_kb("menu_channels"),
-        )
-
-    elif data == "ch_add_bot":
-        PENDING_BOT_ADD.add(user_id)
-        await query.edit_message_text(
-            "یکی از این‌ها را ارسال کنید:\n\n"
-            "۱) یوزرنیم ربات: <code>@id_bot</code>\n"
-            "۲) لینک ربات: <code>https://t.me/id_bot</code>\n"
-            "۳) لینک دعوت با پارامتر استارت: <code>https://t.me/id_bot?start=ref123</code>\n\n"
-            "دکمه‌ی این ربات یک لینک مستقیم است و کاربر با زدن آن به پیوی ربات هدایت می‌شود "
-            "(دکمه‌ی Start با همان پارامتر آماده است). ورودش وقتی تایید می‌شود که «بررسی عضویت» را بزند. "
-            "نیازی به تغییر در ربات مقصد یا دیتابیس مشترک نیست.",
-            parse_mode=ParseMode.HTML,
-            reply_markup=back_kb("menu_channels"),
-        )
-
-    elif data == "ch_list":
-        items = await list_all_items()
-        if not items:
-            await query.edit_message_text("هیچ آیتمی ثبت نشده است.", reply_markup=back_kb("menu_channels"))
-        else:
-            counts = await fetch_member_counts(context.bot, items, force=True)
-            await query.edit_message_text("یکی از موارد زیر را برای مدیریت انتخاب کنید:", reply_markup=build_list_keyboard(items, counts))
-
-    elif data.startswith("ch_view_"):
-        item_id = int(data.split("_")[-1])
-        item = await get_item(item_id)
-        if not item:
-            await query.edit_message_text("این آیتم دیگر وجود ندارد.", reply_markup=back_kb("ch_list"))
-        else:
-            label = KIND_LABEL.get(item.get("kind", "channel"), "کانال")
-            text = (
-                f"مدیریت {label}: <b>{html.escape(item['title'])}</b>\n"
-                f"شناسه: <code>{item['chat_id']}</code>\n"
-                f"لینک: {item['invite_link']}\n"
-                f"وضعیت: {describe_item_schedule(item)}"
-            )
-            count = await fetch_member_count(context.bot, item, force=True)
-            text += f"\nتعرفه‌ی ممبر: {format_quota(item, count)}"
-            await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=build_item_manage_keyboard(item, count))
-
-    elif data.startswith("ch_editlink_"):
-        item_id = int(data.split("_")[-1])
-        PENDING_LINK_EDIT[user_id] = item_id
-        await query.edit_message_text(
-            "لینک جدید را ارسال کنید:",
-            reply_markup=back_kb(f"ch_view_{item_id}"),
-        )
-
-    elif data.startswith("ch_count_"):
-        item_id = int(data.split("_")[-1])
-        item = await get_item(item_id)
-        if not item:
-            await query.edit_message_text("این آیتم دیگر وجود ندارد.", reply_markup=back_kb("ch_list"))
-            return
-        count = await fetch_member_count(context.bot, item, force=True)
-        try:
-            await query.edit_message_reply_markup(reply_markup=build_item_manage_keyboard(item, count))
-        except BadRequest as exc:
-            if "not modified" not in str(exc).lower():
-                raise
-
-    elif data.startswith("ch_quota_"):
-        item_id = int(data.split("_")[-1])
-        item = await get_item(item_id)
-        if not item:
-            await query.edit_message_text("این آیتم دیگر وجود ندارد.", reply_markup=back_kb("ch_list"))
-            return
-        PENDING_ITEM_QUOTA[user_id] = (item_id, False)
-        await query.edit_message_text(
-            QUOTA_PROMPT.format(title=html.escape(item["title"])),
-            parse_mode=ParseMode.HTML,
-            reply_markup=back_kb(f"ch_view_{item_id}"),
-        )
-
-    elif data.startswith("ch_now_"):
-        item_id = int(data.split("_")[-1])
-        item = await get_item(item_id)
-        if not item:
-            await query.edit_message_text("این آیتم دیگر وجود ندارد.", reply_markup=back_kb("ch_list"))
-            return
-        PENDING_ITEM_TIME.pop(user_id, None)
-        err = await set_item_expiry(item_id, None)
-        if err:
-            await query.edit_message_text(f"❌ ذخیره نشد:\n{err}", reply_markup=back_kb(f"ch_view_{item_id}"))
-            return
-        if item.get("quota_done"):
+    if data == "mygroups":
+        groups = await list_groups_by_owner(user_id)
+        if not groups:
             await query.edit_message_text(
-                f"تعرفه‌ی ممبرِ «{item['title']}» قبلاً کامل شده است. برای فعال‌سازی دوباره، "
-                "از دکمه‌ی «🎯 تعرفه‌ی ممبر» تعداد جدید را ثبت کنید.",
-                reply_markup=back_kb(f"ch_view_{item_id}"),
+                "شما هنوز مالک هیچ گروهی نیستید. ربات را در گروه خودتان ادمین کنید.",
+                reply_markup=back_kb("menu_main"),
             )
             return
-        await query.edit_message_text(
-            f"«{item['title']}» هم‌اکنون فعال شد و محدودیت زمانی ندارد ✅", reply_markup=CHANNELS_MENU
-        )
+        await query.edit_message_text("یکی از گروه‌های خود را انتخاب کنید:", reply_markup=groups_list_kb(groups))
+        return
 
-    elif data.startswith("ch_time_"):
-        item_id = int(data.split("_")[-1])
+    if data == "allgroups":
+        if not is_owner(user_id):
+            await query.answer("فقط مالک اصلی ربات به این بخش دسترسی دارد.", show_alert=True)
+            return
+        groups = await list_all_groups()
+        if not groups:
+            await query.edit_message_text("هنوز هیچ گروهی ثبت نشده است.", reply_markup=back_kb("menu_main"))
+            return
+        await query.edit_message_text("همه‌ی گروه‌های ربات:", reply_markup=groups_list_kb(groups))
+        return
+
+    if data == "global":
+        if not is_owner(user_id):
+            await query.answer("فقط مالک اصلی ربات به این بخش دسترسی دارد.", show_alert=True)
+            return
+        await query.edit_message_text(
+            "📡 آیتم‌های سراسری — این‌ها در جوین اجباریِ <b>همه‌ی گروه‌های ربات</b> اعمال می‌شوند.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=scope_panel_kb(GLOBAL_SCOPE),
+        )
+        return
+
+    if not data.startswith("g:"):
+        return  # دیتای ناشناخته
+
+    # ---- مسیرهای مرتبط با یک scope (گروه یا سراسری) ----
+    _, scope, rest = data.split(":", 2)
+    group = None if scope == GLOBAL_SCOPE else await get_group(int(scope))
+
+    if not can_manage_scope(scope, user_id, group):
+        await query.answer("شما اجازه‌ی مدیریت این گروه را ندارید.", show_alert=True)
+        return
+
+    if rest != "ch_add":
+        PENDING_ITEM_ADD.pop(user_id, None)
+    if rest != "ch_add_bot":
+        PENDING_BOT_ADD.pop(user_id, None)
+    if rest != "timer":
+        PENDING_DELETE_TIMER.pop(user_id, None)
+
+    title = html.escape((group or {}).get("title") or "سراسری")
+
+    if rest == "panel":
+        label = "📡 آیتم‌های سراسری" if scope == GLOBAL_SCOPE else f"👥 گروه: {title}"
+        await query.edit_message_text(f"{label}\nیکی از گزینه‌ها را انتخاب کنید:", parse_mode=ParseMode.HTML, reply_markup=scope_panel_kb(scope))
+        return
+
+    if rest == "channels":
+        await query.edit_message_text("مدیریت آیتم‌های جوین اجباری:", reply_markup=channels_menu_kb(scope))
+        return
+
+    if rest == "texts":
+        await query.edit_message_text("ویرایش متن‌ها:", reply_markup=texts_menu_kb(scope))
+        return
+
+    if rest == "timer":
+        current = await get_warn_delete_seconds(group)
+        PENDING_DELETE_TIMER[user_id] = scope
+        await query.edit_message_text(
+            f"زمان فعلی حذف خودکار پیام هشدار: <b>{current:g}</b> ثانیه.\n"
+            "یک عدد غیرمنفی بفرستید (۰ یعنی حذف خودکار غیرفعال).",
+            parse_mode=ParseMode.HTML,
+            reply_markup=back_kb(f"g:{scope}:panel"),
+        )
+        return
+
+    if rest == "ch_add":
+        PENDING_ITEM_ADD[user_id] = scope
+        await query.edit_message_text(ADD_ITEM_PROMPT, parse_mode=ParseMode.HTML, reply_markup=back_kb(f"g:{scope}:channels"))
+        return
+
+    if rest == "ch_add_bot":
+        PENDING_BOT_ADD[user_id] = scope
+        await query.edit_message_text(ADD_BOT_PROMPT, parse_mode=ParseMode.HTML, reply_markup=back_kb(f"g:{scope}:channels"))
+        return
+
+    if rest == "ch_list":
+        items = await list_scope_items(scope)
+        if not items:
+            await query.edit_message_text("هیچ آیتمی ثبت نشده است.", reply_markup=back_kb(f"g:{scope}:channels"))
+        else:
+            await query.edit_message_text("یکی از موارد زیر را برای مدیریت انتخاب کنید:", reply_markup=list_items_kb(scope, items))
+        return
+
+    if rest.startswith("ch_view:"):
+        item_id = int(rest.split(":")[1])
         item = await get_item(item_id)
         if not item:
-            await query.edit_message_text("این آیتم دیگر وجود ندارد.", reply_markup=back_kb("ch_list"))
+            await query.edit_message_text("این آیتم دیگر وجود ندارد.", reply_markup=back_kb(f"g:{scope}:ch_list"))
             return
-        PENDING_ITEM_TIME[user_id] = item_id
-        await query.edit_message_text(
-            f"مدت فعال بودن جوین اجباریِ «{item['title']}» را بفرستید. بعد از این مدت، این مورد خودکار از جوین اجباری کنار می‌رود.\n\n"
-            "مثال‌ها: <code>30m</code> (دقیقه) ، <code>12h</code> (ساعت) ، <code>7d</code> (روز) ، "
-            "<code>90 دقیقه</code> ، <code>2 روز</code>\n"
-            "فقط عدد = ساعت.",
-            parse_mode=ParseMode.HTML,
-            reply_markup=back_kb(f"ch_view_{item_id}"),
+        label = KIND_LABEL.get(item.get("kind", "channel"), "کانال")
+        text = (
+            f"مدیریت {label}: <b>{html.escape(item['title'])}</b>\n"
+            f"شناسه: <code>{item['chat_id']}</code>\n"
+            f"لینک: {item['invite_link']}"
         )
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=item_manage_kb(scope, item))
+        return
 
-    elif data.startswith("ch_del_"):
-        item_id = int(data.split("_")[-1])
+    if rest.startswith("ch_editlink:"):
+        item_id = int(rest.split(":")[1])
+        PENDING_LINK_EDIT[user_id] = item_id
+        await query.edit_message_text("لینک جدید را ارسال کنید:", reply_markup=back_kb(f"g:{scope}:ch_view:{item_id}"))
+        return
+
+    if rest.startswith("ch_del:"):
+        item_id = int(rest.split(":")[1])
         removed = await remove_item_by_id(item_id)
-        items = await list_all_items()
+        items = await list_scope_items(scope)
         msg = "حذف شد ✅" if removed else "حذف نشد، دوباره تلاش کنید."
         if items:
-            counts = await fetch_member_counts(context.bot, items, force=True)
-            await query.edit_message_text(f"{msg}\n\nیکی از موارد زیر را برای مدیریت انتخاب کنید:", reply_markup=build_list_keyboard(items, counts))
+            await query.edit_message_text(f"{msg}\n\nیکی از موارد زیر را برای مدیریت انتخاب کنید:", reply_markup=list_items_kb(scope, items))
         else:
-            await query.edit_message_text(f"{msg}\n\nهیچ آیتمی ثبت نشده است.", reply_markup=back_kb("menu_channels"))
+            await query.edit_message_text(f"{msg}\n\nهیچ آیتمی ثبت نشده است.", reply_markup=back_kb(f"g:{scope}:channels"))
+        return
 
-    elif data == "menu_texts":
-        await query.edit_message_text("ویرایش متن‌ها:", reply_markup=TEXTS_MENU)
-
-    elif data == "txt_warn":
-        PENDING_TEXT_EDIT[user_id] = "warn_text"
-        current = await get_text("warn_text", DEFAULT_WARN_TEXT)
+    if rest in ("txt_warn", "txt_joined"):
+        key = "warn_text" if rest == "txt_warn" else "joined_text"
+        PENDING_TEXT_EDIT[user_id] = (scope, key)
+        example = DEFAULT_WARN_TEXT if key == "warn_text" else DEFAULT_JOINED_TEXT
         await query.edit_message_text(
-            "متن فعلی هشدار عضویت (لیست موارد باقی‌مانده خودکار زیرش، داخل نقل قول، اضافه می‌شود):\n\n"
-            f"<code>{html.escape(current)}</code>\n\n"
-            "متن جدید را با همان قالب‌بندی دلخواه (بولد، نقل قول، کج، زیرخط، اسپویلر و...) ارسال کنید؛ "
-            "دقیقاً همان‌طور در گروه ارسال می‌شود. متغیرها: <code>{mention}</code> یا <code>منشن_کاربر</code>",
+            "متن جدید را ارسال کنید. از <code>{mention}</code> برای جای منشن کاربر استفاده کنید.\n\n"
+            f"نمونه‌ی پیش‌فرض:\n<code>{html.escape(example)}</code>",
             parse_mode=ParseMode.HTML,
-            reply_markup=back_kb("menu_texts"),
+            reply_markup=back_kb(f"g:{scope}:texts"),
         )
-
-    elif data == "txt_joined":
-        PENDING_TEXT_EDIT[user_id] = "joined_text"
-        current = await get_text("joined_text", DEFAULT_JOINED_TEXT)
-        await query.edit_message_text(
-            "متن فعلی تایید عضویت:\n\n"
-            f"<code>{html.escape(current)}</code>\n\n"
-            "متن جدید را با همان قالب‌بندی دلخواه ارسال کنید؛ دقیقاً همان‌طور در گروه ارسال می‌شود. "
-            "متغیرها: <code>{mention}</code> یا <code>منشن_کاربر</code>",
-            parse_mode=ParseMode.HTML,
-            reply_markup=back_kb("menu_texts"),
-        )
-
-    elif data == "menu_delete_timer":
-        PENDING_DELETE_TIMER_SET.add(user_id)
-        current = await get_warn_delete_seconds()
-        await query.edit_message_text(
-            f"زمان فعلی حذف خودکار پیام هشدار جوین اجباری: <b>{current:g} ثانیه</b>\n\n"
-            "عدد جدید (ثانیه) را ارسال کنید، مثلاً <code>5</code> یا <code>10</code>.\n"
-            "برای غیرفعال‌کردن حذف خودکار، عدد <code>0</code> را ارسال کنید.",
-            parse_mode=ParseMode.HTML,
-            reply_markup=back_kb("menu_main"),
-        )
-
-    elif data == "menu_status":
-        group_id = await get_group_id()
-        items = await list_items()
-        delete_seconds = await get_warn_delete_seconds()
-        text = (
-            f"گروه فعال: <code>{group_id if group_id else 'تنظیم نشده'}</code>\n"
-            f"تعداد آیتم‌ها: {len(items)}\n"
-            f"زمان حذف پیام هشدار: {delete_seconds:g} ثانیه"
-        )
-        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=back_kb("menu_main"))
+        return
 
 
-QUOTA_PROMPT = (
-    "تعداد ممبر مورد نیازِ «<b>{title}</b>» را بفرستید.\n\n"
-    "• عدد دلخواه، مثلاً <code>200</code>: وقتی همین تعداد کاربر جدید عضو شدند، "
-    "این مورد خودکار از جوین اجباری برداشته می‌شود.\n"
-    "• <code>0</code>: نامحدود (تا وقتی دستی حذف یا زمان‌بندی نشود فعال می‌ماند).\n\n"
-    "شمارش از همین لحظه شروع می‌شود."
-)
-
-
-def parse_member_limit(text: str) -> Optional[int]:
-    """عدد صحیح غیرمنفی (ارقام فارسی/عربی و جداکننده‌ی هزارگان پشتیبانی می‌شود)؛ نامعتبر = None."""
-    cleaned = (text or "").translate(_PERSIAN_DIGITS).strip().replace(",", "").replace("٬", "").replace(" ", "")
-    if not cleaned.isdigit():
-        return None
-    value = int(cleaned)
-    return value if value <= MAX_MEMBER_LIMIT else None
-
-
-def _extract_link_or_generate(chat_full, username: Optional[str]) -> Optional[str]:
-    if chat_full.invite_link:
-        return chat_full.invite_link
-    if username:
-        return f"https://t.me/{username}"
-    return None
+# ---------------------------------------------------------------------------
+# پردازش ورودی‌های متنیِ پیوی
+# ---------------------------------------------------------------------------
 
 
 def parse_chat_ref(text: str):
-    """
-    تلاش برای استخراج یک شناسه‌ی قابل استفاده در get_chat از متن ورودی ادمین.
-    ورودی‌های پشتیبانی‌شده: @username ، t.me/username ، https://t.me/username ،
-    آیدی عددی (-100...) و یوزرنیم بدون @ .
-    خروجی: (ref, private_invite_link)
-        ref: چیزی که مستقیم می‌شود به get_chat داد (str یا int) یا None
-        private_invite_link: اگر ورودی یک لینک دعوت خصوصی (t.me/+... یا joinchat) بود،
-            همان لینک برگردانده می‌شود چون get_chat نمی‌تواند آن را resolve کند.
-    """
+    """متن را به (ref قابل‌استفاده در get_chat، لینک خصوصیِ احتمالی) تبدیل می‌کند."""
     text = text.strip()
-    if not text:
-        return None, None
-
-    m = re.match(r"^(?:https?://)?t\.me/(\+|joinchat/)[\w-]+/?$", text, re.IGNORECASE)
+    m = re.match(r"^(?:https?://)?(?:t\.me|telegram\.me)/\+([A-Za-z0-9_-]+)/?$", text, re.IGNORECASE)
     if m:
-        return None, text
-
-    m = re.match(r"^(?:https?://)?t\.me/([A-Za-z0-9_]{5,32})/?$", text, re.IGNORECASE)
+        return None, f"https://t.me/+{m.group(1)}"
+    m = re.match(r"^(?:https?://)?(?:t\.me|telegram\.me)/joinchat/([A-Za-z0-9_-]+)/?$", text, re.IGNORECASE)
+    if m:
+        return None, f"https://t.me/joinchat/{m.group(1)}"
+    m = re.match(r"^(?:https?://)?(?:t\.me|telegram\.me)/([A-Za-z0-9_]{5,32})/?$", text, re.IGNORECASE)
     if m:
         return f"@{m.group(1)}", None
-
-    m = re.match(r"^@([A-Za-z0-9_]{5,32})$", text)
-    if m:
+    if text.startswith("@"):
         return text, None
-
-    m = re.match(r"^-?\d+$", text)
-    if m:
+    if re.match(r"^-?\d+$", text):
         return int(text), None
-
     m = re.match(r"^[A-Za-z0-9_]{5,32}$", text)
     if m:
         return f"@{text}", None
-
     return None, None
 
 
 async def owner_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """پیام‌های متنی ادمین در پیوی که برای مراحل pending استفاده می‌شوند."""
-    user = update.effective_user
     message = update.effective_message
-
-    if update.effective_chat.type != Chat.PRIVATE:
-        return
-    if not is_admin(user.id):
-        return  # کاربر عادی؛ پنل خرید/خدمات حذف شده، چیزی برای نمایش نیست
-
-    user_id = user.id
-
-    # حالت: ثبت گروه
-    if user_id in PENDING_GROUP_SET:
-        PENDING_GROUP_SET.discard(user_id)
-        chat_id = None
-        origin = message.forward_origin
-        if origin is not None:
-            origin_chat = getattr(origin, "sender_chat", None) or getattr(origin, "chat", None)
-            if origin_chat is not None and origin_chat.type in (Chat.GROUP, Chat.SUPERGROUP):
-                chat_id = origin_chat.id
-
-        if chat_id is None and message.text:
-            ref, private_link = parse_chat_ref(message.text)
-            if ref is not None:
-                try:
-                    chat_full = await context.bot.get_chat(ref)
-                except (BadRequest, Forbidden) as exc:
-                    await message.reply_text(f"خطا در دسترسی به گروه: {exc}")
-                    return
-                if chat_full.type not in (Chat.GROUP, Chat.SUPERGROUP):
-                    await message.reply_text("این یک گروه نیست. لطفاً لینک/آیدی/فوروارد یک گروه را ارسال کنید.")
-                    return
-                chat_id = chat_full.id
-            elif private_link is not None:
-                await message.reply_text(
-                    "لینک دعوت خصوصی را نمی‌توان مستقیماً resolve کرد. "
-                    "لطفاً آیدی عددی گروه را ارسال کنید یا پیامی از «ادمین ناشناس» در آن گروه را فوروارد کنید."
-                )
-                return
-
-        if chat_id is None:
-            await message.reply_text("ورودی نامعتبر است. دوباره تلاش کنید.")
-            return
-
-        try:
-            member = await context.bot.get_chat_member(chat_id, context.bot.id)
-            if member.status not in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER):
-                await message.reply_text("ربات باید در آن گروه ادمین باشد.")
-                return
-        except (BadRequest, Forbidden) as exc:
-            await message.reply_text(f"خطا در دسترسی به گروه: {exc}")
-            return
-
-        set_error = await set_group_id(chat_id)
-        if set_error:
-            await message.reply_text(
-                f"❌ ذخیره در دیتابیس شکست خورد:\n<code>{set_error}</code>",
-                parse_mode=ParseMode.HTML,
-            )
-            return
-        await message.reply_text(f"گروه با آیدی {chat_id} ثبت شد ✅", reply_markup=MAIN_MENU)
+    user_id = update.effective_user.id
+    if message is None:
         return
 
-    # حالت: افزودن کانال/گروه
+    # ---- افزودن کانال/گروه ----
     if user_id in PENDING_ITEM_ADD:
-        PENDING_ITEM_ADD.discard(user_id)
+        scope = PENDING_ITEM_ADD[user_id]
+        group = None if scope == GLOBAL_SCOPE else await get_group(int(scope))
+        if not can_manage_scope(scope, user_id, group):
+            PENDING_ITEM_ADD.pop(user_id, None)
+            return
 
-        async def _finish_add(chat_full, forced_link: Optional[str] = None) -> None:
-            invite_link = forced_link or _extract_link_or_generate(chat_full, chat_full.username)
-            if not invite_link:
-                try:
-                    invite_link = await context.bot.export_chat_invite_link(chat_full.id)
-                except (BadRequest, Forbidden) as exc:
-                    await message.reply_text(
-                        "لینک دعوت پیدا نشد و ربات نتوانست خودش لینک بسازد. "
-                        f"مطمئن شوید ربات ادمین با دسترسی دعوت کاربران است. ({exc})"
-                    )
-                    return
-            kind = "channel" if chat_full.type == Chat.CHANNEL else "group"
-            try:
-                baseline = await context.bot.get_chat_member_count(chat_full.id)
-            except (BadRequest, Forbidden, TimedOut, NetworkError) as exc:
-                logger.warning("گرفتن تعداد اولیه‌ی اعضا ممکن نبود: %s", exc)
-                baseline = None
-            err = await add_item(kind, str(chat_full.id), chat_full.title, invite_link, baseline)
+        async def _finish_add(chat_full, forced_link: Optional[str] = None):
+            PENDING_ITEM_ADD.pop(user_id, None)
+            kind = "group" if chat_full.type in (Chat.GROUP, Chat.SUPERGROUP) else "channel"
+            link = forced_link
+            if link is None:
+                if chat_full.username:
+                    link = f"https://t.me/{chat_full.username}"
+                else:
+                    try:
+                        invite = await context.bot.create_chat_invite_link(chat_full.id)
+                        link = invite.invite_link
+                    except (BadRequest, Forbidden) as exc:
+                        await message.reply_text(
+                            "ربات نتوانست لینک دعوت بسازد (احتمالاً ادمین آن کانال/گروه نیست). "
+                            f"لینک را به‌صورت دستی بفرستید یا ربات را ادمین کنید.\n({exc})"
+                        )
+                        PENDING_ITEM_ADD[user_id] = scope
+                        return
+            err = await add_item(scope, kind, str(chat_full.id), chat_full.title or str(chat_full.id), link)
             if err:
-                await message.reply_text(
-                    f"❌ ذخیره در دیتابیس شکست خورد:\n<code>{err}</code>\n\n"
-                    "احتمالاً جدول channels در Supabase ساختار درستی ندارد "
-                    "(نیاز به UNIQUE روی ستون chat_id دارد). از کوئری‌های ساخت جدول استفاده کنید.",
-                    parse_mode=ParseMode.HTML,
-                )
+                await message.reply_text(f"❌ ذخیره در دیتابیس شکست خورد:\n<code>{err}</code>", parse_mode=ParseMode.HTML)
                 return
-            added = await get_item_by_chat_id(str(chat_full.id))
-            if added:
-                PENDING_ITEM_QUOTA[user_id] = (added["id"], True)
-                await message.reply_text(
-                    f"{KIND_LABEL[kind]} «{chat_full.title}» با موفقیت اضافه شد ✅\n\n"
-                    + QUOTA_PROMPT.format(title=html.escape(chat_full.title)),
-                    parse_mode=ParseMode.HTML,
-                )
-            else:
-                await message.reply_text(
-                    f"{KIND_LABEL[kind]} «{chat_full.title}» با موفقیت اضافه شد ✅", reply_markup=CHANNELS_MENU
-                )
+            await message.reply_text(
+                f"«{html.escape(chat_full.title or '')}» اضافه شد ✅", reply_markup=channels_menu_kb(scope)
+            )
 
-        origin = message.forward_origin
-        origin_chat = getattr(origin, "chat", None) if origin is not None else None
-        if origin_chat is not None and origin_chat.type in (Chat.CHANNEL, Chat.GROUP, Chat.SUPERGROUP):
-            try:
-                chat_full = await context.bot.get_chat(origin_chat.id)
-            except (BadRequest, Forbidden) as exc:
-                await message.reply_text(f"خطا: {exc}")
-                return
-            await _finish_add(chat_full)
+        if message.forward_from_chat is not None:
+            await _finish_add(message.forward_from_chat)
             return
 
         text = (message.text or "").strip()
-
         if "|" in text:
-            chat_part, link_part = [p.strip() for p in text.split("|", 1)]
-            ref, _private_link = parse_chat_ref(chat_part)
-            if ref is None:
-                ref = chat_part  # اجازه بده get_chat خودش خطا بدهد اگر واقعاً نامعتبر بود
+            ref_part, link_part = (p.strip() for p in text.split("|", 1))
             try:
-                chat_full = await context.bot.get_chat(ref)
+                chat_id_num = int(ref_part)
+            except ValueError:
+                await message.reply_text("فرمت نامعتبر است. مثال: <code>-1001234567890 | https://t.me/+AbCdEfGhIj</code>", parse_mode=ParseMode.HTML)
+                return
+            try:
+                chat_full = await context.bot.get_chat(chat_id_num)
             except (BadRequest, Forbidden) as exc:
                 await message.reply_text(f"خطا در دسترسی: {exc}")
                 return
@@ -1623,7 +1276,6 @@ async def owner_private_message(update: Update, context: ContextTypes.DEFAULT_TY
             await _finish_add(chat_full, forced_link=link_part)
             return
 
-        # ورودی تک‌خطی: می‌تواند @username، لینک t.me عمومی یا آیدی عددی باشد
         ref, private_link = parse_chat_ref(text)
         if ref is not None:
             try:
@@ -1639,10 +1291,10 @@ async def owner_private_message(update: Update, context: ContextTypes.DEFAULT_TY
 
         if private_link is not None:
             await message.reply_text(
-                "این یک لینک دعوت خصوصی است و ربات نمی‌تواند فقط از روی آن، کانال/گروه را resolve کند "
-                "(محدودیت API تلگرام). یکی از راه‌های زیر را امتحان کنید:\n\n"
+                "این یک لینک دعوت خصوصی است و ربات نمی‌تواند فقط از روی آن، کانال/گروه را resolve کند. "
+                "یکی از راه‌های زیر را امتحان کنید:\n\n"
                 "۱) ربات را ادمین آن کانال/گروه کنید و یک پیام از آن را برای من فوروارد کنید.\n"
-                "۲) اگر آیدی عددی کانال/گروه را می‌دانید، به این شکل بفرستید:\n"
+                "۲) اگر آیدی عددی کانال/گروه را می‌دانید:\n"
                 f"<code>-1001234567890 | {private_link}</code>",
                 parse_mode=ParseMode.HTML,
             )
@@ -1650,21 +1302,21 @@ async def owner_private_message(update: Update, context: ContextTypes.DEFAULT_TY
 
         await message.reply_text(
             "فرمت نامعتبر است. یکی از این‌ها را بفرستید: یوزرنیم (@channel)، لینک عمومی t.me/... ، "
-            "آیدی عددی، یا فوروارد یک پیام از آن کانال/گروه.\n\n"
-            "برای لینک خصوصی: <code>-1001234567890 | https://t.me/+AbCdEfGhIj</code>",
+            "آیدی عددی، یا فوروارد یک پیام از آن کانال/گروه.",
             parse_mode=ParseMode.HTML,
         )
         return
 
-    # حالت: افزودن ربات
+    # ---- افزودن ربات ----
     if user_id in PENDING_BOT_ADD:
-        PENDING_BOT_ADD.discard(user_id)
+        scope = PENDING_BOT_ADD[user_id]
+        group = None if scope == GLOBAL_SCOPE else await get_group(int(scope))
+        if not can_manage_scope(scope, user_id, group):
+            PENDING_BOT_ADD.pop(user_id, None)
+            return
+        PENDING_BOT_ADD.pop(user_id, None)
         raw = (message.text or "").strip()
-        m = re.match(
-            r"^(?:https?://)?(?:t\.me|telegram\.me)/([A-Za-z0-9_]{5,32})/?(?:\?(.*))?$",
-            raw,
-            re.IGNORECASE,
-        )
+        m = re.match(r"^(?:https?://)?(?:t\.me|telegram\.me)/([A-Za-z0-9_]{5,32})/?(?:\?(.*))?$", raw, re.IGNORECASE)
         if m:
             username = m.group(1)
             query_string = m.group(2) or ""
@@ -1681,107 +1333,30 @@ async def owner_private_message(update: Update, context: ContextTypes.DEFAULT_TY
             bot_chat = await context.bot.get_chat(f"@{username}")
             title = bot_chat.first_name or bot_chat.title or username
         except (BadRequest, Forbidden) as exc:
-            logger.info("گرفتن اطلاعات ربات %s ممکن نبود، از یوزرنیم به‌عنوان عنوان استفاده شد: %s", username, exc)
+            logger.info("گرفتن اطلاعات ربات %s ممکن نبود: %s", username, exc)
 
-        err = await add_item("bot", username, title, deep_link, await count_bot_starts(username))
+        err = await add_item(scope, "bot", username, title, deep_link)
         if err:
-            await message.reply_text(
-                f"❌ ذخیره در دیتابیس شکست خورد:\n<code>{err}</code>", parse_mode=ParseMode.HTML
-            )
+            await message.reply_text(f"❌ ذخیره در دیتابیس شکست خورد:\n<code>{err}</code>", parse_mode=ParseMode.HTML)
             return
-        added = await get_item_by_chat_id(username)
-        if added:
-            PENDING_ITEM_QUOTA[user_id] = (added["id"], True)
-            await message.reply_text(
-                f"ربات «{title}» اضافه شد ✅\n"
-                f"لینک استارت: {deep_link}\n\n"
-                + QUOTA_PROMPT.format(title=html.escape(title)),
-                parse_mode=ParseMode.HTML,
-                disable_web_page_preview=True,
-            )
-        else:
-            await message.reply_text(
-                f"ربات «{title}» اضافه شد ✅\nلینک استارت: {deep_link}",
-                reply_markup=CHANNELS_MENU,
-                disable_web_page_preview=True,
-            )
-        return
-
-    # حالت: دریافت تعرفه‌ی ممبر
-    if user_id in PENDING_ITEM_QUOTA:
-        item_id, just_added = PENDING_ITEM_QUOTA[user_id]
-        limit = parse_member_limit(message.text or "")
-        if limit is None:
-            await message.reply_text(
-                "عدد نامعتبر است. یک عدد صحیح بفرستید (مثلاً 200)، یا 0 برای نامحدود."
-            )
-            return
-        PENDING_ITEM_QUOTA.pop(user_id, None)
-        item = await get_item(item_id)
-        if not item:
-            await message.reply_text("این آیتم دیگر وجود ندارد.", reply_markup=CHANNELS_MENU)
-            return
-        baseline = None
-        if limit > 0:
-            try:
-                if item.get("kind") == "bot":
-                    baseline = await count_bot_starts(item["chat_id"])
-                else:
-                    baseline = await context.bot.get_chat_member_count(item["chat_id"])
-            except (BadRequest, Forbidden, TimedOut, NetworkError) as exc:
-                await message.reply_text(
-                    f"❌ گرفتن تعداد فعلی اعضا ممکن نبود، تعرفه ثبت نشد. مطمئن شوید ربات در آن ادمین است.\n({exc})"
-                )
-                PENDING_ITEM_QUOTA[user_id] = (item_id, just_added)
-                return
-        err = await set_item_quota(item_id, limit, baseline)
-        if err:
-            await message.reply_text(f"❌ ذخیره نشد:\n{err}")
-            return
-        item = await get_item(item_id)
-        note = (
-            "نامحدود ثبت شد ✅"
-            if limit == 0
-            else f"تعرفه ثبت شد ✅ بعد از ورود {limit:,} کاربر جدید، «{item['title']}» خودکار از جوین اجباری برداشته می‌شود."
-        )
-        if just_added and item:
-            await message.reply_text(
-                f"{note}\n\nهمین حالا فعال شود یا برایش زمان هم تنظیم کنید؟",
-                reply_markup=build_schedule_keyboard(item["id"]),
-            )
-        else:
-            count = await fetch_member_count(context.bot, item) if item else None
-            await message.reply_text(
-                note, reply_markup=build_item_manage_keyboard(item, count) if item else CHANNELS_MENU
-            )
-        return
-
-    # حالت: تنظیم مدت فعال بودن آیتم
-    if user_id in PENDING_ITEM_TIME:
-        item_id = PENDING_ITEM_TIME[user_id]
-        delta = parse_duration(message.text or "")
-        if delta is None:
-            await message.reply_text(
-                "مدت نامعتبر است. مثال: 30m ، 12h ، 7d ، 90 دقیقه ، 2 روز (فقط عدد = ساعت). دوباره بفرستید."
-            )
-            return
-        PENDING_ITEM_TIME.pop(user_id, None)
-        err = await set_item_expiry(item_id, datetime.now(timezone.utc) + delta)
-        if err:
-            await message.reply_text(f"❌ ذخیره نشد:\n{err}")
-            return
-        item = await get_item(item_id)
-        count = await fetch_member_count(context.bot, item) if item else None
         await message.reply_text(
-            f"زمان تنظیم شد ✅ «{item['title'] if item else ''}» به مدت {format_duration(delta)} فعال است "
-            "و بعد از آن خودکار از جوین اجباری کنار می‌رود.",
-            reply_markup=build_item_manage_keyboard(item, count) if item else CHANNELS_MENU,
+            f"ربات «{html.escape(title)}» اضافه شد ✅\nلینک استارت: {deep_link}",
+            reply_markup=channels_menu_kb(scope),
+            disable_web_page_preview=True,
         )
         return
 
-    # حالت: ویرایش لینک آیتم
+    # ---- ویرایش لینک آیتم ----
     if user_id in PENDING_LINK_EDIT:
         item_id = PENDING_LINK_EDIT.pop(user_id)
+        item = await get_item(item_id)
+        if not item:
+            await message.reply_text("این آیتم دیگر وجود ندارد.")
+            return
+        scope = GLOBAL_SCOPE if item.get("group_id") is None else str(item["group_id"])
+        group = None if scope == GLOBAL_SCOPE else await get_group(int(scope))
+        if not can_manage_scope(scope, user_id, group):
+            return
         new_link = (message.text or "").strip()
         if not new_link:
             await message.reply_text("لینک نامعتبر است.")
@@ -1790,42 +1365,47 @@ async def owner_private_message(update: Update, context: ContextTypes.DEFAULT_TY
         if err:
             await message.reply_text(f"❌ ذخیره در دیتابیس شکست خورد:\n<code>{err}</code>", parse_mode=ParseMode.HTML)
             return
-        item = await get_item(item_id)
-        count = await fetch_member_count(context.bot, item) if item else None
-        await message.reply_text("لینک به‌روزرسانی شد ✅", reply_markup=build_item_manage_keyboard(item, count) if item else CHANNELS_MENU)
+        await message.reply_text("لینک به‌روزرسانی شد ✅", reply_markup=channels_menu_kb(scope))
         return
 
-    # حالت: تنظیم زمان حذف خودکار پیام هشدار
-    if user_id in PENDING_DELETE_TIMER_SET:
-        PENDING_DELETE_TIMER_SET.discard(user_id)
+    # ---- تنظیم زمان حذف خودکار پیام هشدار ----
+    if user_id in PENDING_DELETE_TIMER:
+        scope = PENDING_DELETE_TIMER.pop(user_id)
+        if scope == GLOBAL_SCOPE:
+            return
+        group = await get_group(int(scope))
+        if not can_manage_scope(scope, user_id, group):
+            return
         raw = (message.text or "").strip().replace(",", ".")
         try:
             seconds = float(raw)
             if seconds < 0:
                 raise ValueError
         except ValueError:
-            await message.reply_text(
-                "عدد نامعتبر است. یک عدد غیرمنفی ارسال کنید (مثلاً 5 یا 0).",
-                reply_markup=back_kb("menu_main"),
-            )
+            await message.reply_text("عدد نامعتبر است. یک عدد غیرمنفی ارسال کنید (مثلاً 5 یا 0).")
             return
-        err = await set_warn_delete_seconds(seconds)
+        err = await set_group_field(int(scope), "delete_seconds", seconds)
         if err:
             await message.reply_text(f"❌ ذخیره در دیتابیس شکست خورد:\n<code>{err}</code>", parse_mode=ParseMode.HTML)
             return
         note = "حذف خودکار غیرفعال شد." if seconds == 0 else f"پیام‌های هشدار بعد از {seconds:g} ثانیه پاک می‌شوند."
-        await message.reply_text(f"ذخیره شد ✅\n{note}", reply_markup=MAIN_MENU)
+        await message.reply_text(f"ذخیره شد ✅\n{note}", reply_markup=scope_panel_kb(scope))
         return
 
-    # حالت: ویرایش متن‌ها
+    # ---- ویرایش متن‌ها ----
     if user_id in PENDING_TEXT_EDIT:
-        key = PENDING_TEXT_EDIT.pop(user_id)
-        new_text = message.text_html or ""  # قالب‌بندی (بولد، نقل قول، ...) به‌صورت HTML ذخیره می‌شود
-        err = await set_text(key, new_text)
+        scope, key = PENDING_TEXT_EDIT.pop(user_id)
+        if scope == GLOBAL_SCOPE:
+            return
+        group = await get_group(int(scope))
+        if not can_manage_scope(scope, user_id, group):
+            return
+        new_text = message.text_html or ""
+        err = await set_group_field(int(scope), key, new_text)
         if err:
             await message.reply_text(f"❌ ذخیره در دیتابیس شکست خورد:\n<code>{err}</code>", parse_mode=ParseMode.HTML)
             return
-        await message.reply_text("متن با موفقیت به‌روزرسانی شد ✅", reply_markup=TEXTS_MENU)
+        await message.reply_text("متن با موفقیت به‌روزرسانی شد ✅", reply_markup=texts_menu_kb(scope))
         return
 
 
@@ -1833,10 +1413,8 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     """هندلر سراسری خطا؛ جلوگیری از کرش کل ربات به‌خاطر یک آپدیت خراب."""
     if isinstance(context.error, Conflict):
         logger.error(
-            "خطای Conflict: یک نمونه‌ی دیگر از همین ربات (همین توکن) هم‌زمان در حال polling است. "
-            "مطمئن شوید فقط یک instance از سرویس روی Render (یا هر جای دیگر) در حال اجراست "
-            "و دیپلوی قبلی کاملاً متوقف شده. این خطا خودش هیچ کرشی ایجاد نمی‌کند و ربات تلاش "
-            "می‌کند دوباره وصل شود."
+            "خطای Conflict: یک نمونه‌ی دیگر از همین ربات هم‌زمان در حال اجراست. "
+            "مطمئن شوید فقط یک instance از سرویس در حال اجراست."
         )
         return
     logger.error("خطای پردازش‌نشده: %s", context.error, exc_info=context.error)
@@ -1846,12 +1424,8 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
 # اجرای ربات (Webhook روی aiohttp)
 # ---------------------------------------------------------------------------
 
-# مسیر مخفی وبهوک؛ اگر در env ست نشود، یک مقدار تصادفی ثابتِ فرآیند ساخته می‌شود
-# (بهتر است WEBHOOK_SECRET را در Render ست کنید تا بین دیپلوی‌ها ثابت بماند).
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET") or secrets.token_urlsafe(24)
 WEBHOOK_PATH = f"/webhook/{WEBHOOK_SECRET}"
-
-# Render این مقدار را خودش و به‌صورت خودکار در env ست می‌کند.
 BASE_URL = (os.environ.get("RENDER_EXTERNAL_URL") or os.environ.get("WEBHOOK_URL", "")).rstrip("/")
 
 
@@ -1861,16 +1435,13 @@ async def _health(_request: web.Request) -> web.Response:
 
 async def _telegram_webhook(request: web.Request) -> web.Response:
     application: Application = request.app["application"]
-
     secret_header = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
     if secret_header != WEBHOOK_SECRET:
         return web.Response(status=403, text="forbidden")
-
     try:
         data = await request.json()
     except Exception:
         return web.Response(status=400, text="bad request")
-
     update = Update.de_json(data, application.bot)
     if update:
         await application.update_queue.put(update)
@@ -1878,11 +1449,13 @@ async def _telegram_webhook(request: web.Request) -> web.Response:
 
 
 async def _on_startup(app: web.Application) -> None:
-    global _quota_bot
     application: Application = app["application"]
     await application.initialize()
     await application.start()
-    _quota_bot = application.bot
+    try:
+        await application.bot.set_my_name(name=BOT_DISPLAY_NAME)
+    except TelegramError as exc:
+        logger.warning("تغییر نام نمایشی ربات ممکن نشد: %s", exc)
 
     webhook_url = f"{BASE_URL}{WEBHOOK_PATH}"
     await application.bot.set_webhook(
@@ -1902,6 +1475,22 @@ async def _on_cleanup(app: web.Application) -> None:
     await application.shutdown()
 
 
+async def _process_update_queue(application: Application) -> None:
+    while True:
+        try:
+            update = await application.update_queue.get()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.error("خطا در دریافت از صف آپدیت: %s", exc, exc_info=exc)
+            continue
+        try:
+            task = application.create_task(application.process_update(update))
+            task.add_done_callback(_log_task_exception)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("خطا در ایجاد تسک پردازش آپدیت: %s", exc, exc_info=exc)
+
+
 def main() -> None:
     if not BOT_TOKEN:
         raise RuntimeError("متغیر محیطی BOT_TOKEN باید تنظیم شود.")
@@ -1913,18 +1502,13 @@ def main() -> None:
             "WEBHOOK_URL را برابر آدرس عمومی سرویس‌تان (بدون / انتهایی) ست کنید."
         )
 
-    request = HTTPXRequest(
-        connect_timeout=15.0,
-        read_timeout=30.0,
-        write_timeout=15.0,
-        pool_timeout=15.0,
-    )
+    request = HTTPXRequest(connect_timeout=15.0, read_timeout=30.0, write_timeout=15.0, pool_timeout=15.0)
 
     application: Application = (
         ApplicationBuilder()
         .token(BOT_TOKEN)
         .request(request)
-        .concurrent_updates(True)  # پردازش موازی پیام‌ها => سرعت بالا، پیامی جا نمی‌ماند
+        .concurrent_updates(True)
         .build()
     )
 
@@ -1932,16 +1516,13 @@ def main() -> None:
 
     application.add_handler(CommandHandler("start", start_cmd))
     application.add_handler(ChatMemberHandler(on_chat_member_update, ChatMemberHandler.CHAT_MEMBER))
+    application.add_handler(ChatMemberHandler(on_bot_membership_update, ChatMemberHandler.MY_CHAT_MEMBER))
 
     application.add_handler(CallbackQueryHandler(on_check_membership, pattern=r"^check_membership(_\d+)?$"))
-    application.add_handler(CallbackQueryHandler(owner_panel_router, pattern="^(menu_|ch_|txt_)"))
+    application.add_handler(CallbackQueryHandler(owner_panel_router, pattern=r"^(menu_main$|mygroups$|global$|allgroups$|g:)"))
 
-    application.add_handler(
-        MessageHandler(filters.ChatType.GROUPS & ~filters.StatusUpdate.ALL, on_group_message)
-    )
-    application.add_handler(
-        MessageHandler(filters.ChatType.PRIVATE & filters.ALL, owner_private_message)
-    )
+    application.add_handler(MessageHandler(filters.ChatType.GROUPS & ~filters.StatusUpdate.ALL, on_group_message))
+    application.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.ALL, owner_private_message))
 
     web_app = web.Application()
     web_app["application"] = application
@@ -1956,52 +1537,18 @@ def main() -> None:
 
     async def _run_with_processor() -> None:
         runner = web.AppRunner(web_app)
-        await runner.setup()  # اینجا _on_startup صدا زده می‌شود: initialize()+start()+set_webhook
+        await runner.setup()
         site = web.TCPSite(runner, "0.0.0.0", port)
         await site.start()
-
-        # پردازشگر آپدیت‌ها: چون اینجا run_polling استفاده نمی‌شود،
-        # خودمان باید صف update_queue را مصرف کنیم.
         queue_task = asyncio.create_task(_process_update_queue(application))
         try:
             while True:
                 await asyncio.sleep(3600)
         finally:
             queue_task.cancel()
-            await runner.cleanup()  # اینجا _on_cleanup صدا زده می‌شود: delete_webhook()+stop()+shutdown()
+            await runner.cleanup()
 
     asyncio.run(_run_with_processor())
-
-
-def _log_task_exception(task: asyncio.Task) -> None:
-    if task.cancelled():
-        return
-    exc = task.exception()
-    if exc is not None:
-        logger.error("خطای پردازش‌نشده در تسک آپدیت: %s", exc, exc_info=exc)
-
-
-async def _process_update_queue(application: Application) -> None:
-    """
-    مصرف‌کننده‌ی صف آپدیت‌ها. حیاتی‌ست که این حلقه هرگز کامل متوقف نشود، وگرنه
-    aiohttp همچنان سالم و 'روشن' جواب می‌دهد ولی هیچ آپدیتی از تلگرام دیگر
-    پردازش نمی‌شود (دقیقاً همان علامتی که گزارش شده: رندر روشن، ربات ساکت).
-    برای همین هر خطای احتمالی این‌جا catch می‌شود تا خودِ حلقه هیچ‌وقت نمیرد.
-    """
-    while True:
-        try:
-            update = await application.update_queue.get()
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            logger.error("خطا در دریافت از صف آپدیت: %s", exc, exc_info=exc)
-            continue
-
-        try:
-            task = application.create_task(application.process_update(update))
-            task.add_done_callback(_log_task_exception)
-        except Exception as exc:  # noqa: BLE001
-            logger.error("خطا در ایجاد تسک پردازش آپدیت: %s", exc, exc_info=exc)
 
 
 if __name__ == "__main__":
