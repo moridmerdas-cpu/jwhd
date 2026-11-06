@@ -1,0 +1,131 @@
+"""
+موتور — اتصال مستقیم با IP سرور (بدون WARP، بدون پروکسی)
+"""
+import asyncio
+import sys
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Optional
+
+from telethon import TelegramClient, functions
+from telethon.sessions import StringSession
+from telethon.errors import (
+    FloodWaitError, AuthKeyError, SessionRevokedError,
+    UserDeactivatedBanError
+)
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from config import Config
+from models import database as db
+
+
+import json as _json
+from pathlib import Path as _Path
+
+
+_HEALTHY_CACHE = {"data": None, "loaded_at": 0}
+
+
+def _get_proxy_for_phone(phone):
+    """پروکسی از healthy_ports.json برمی‌گردونه (با cache 30s)"""
+    import time
+    now = time.time()
+    if _HEALTHY_CACHE["data"] is None or now - _HEALTHY_CACHE["loaded_at"] > 30:
+        try:
+            f = _Path("/root/tg_master_bot/proxies/healthy_ports.json")
+            if f.exists():
+                _HEALTHY_CACHE["data"] = _json.loads(f.read_text())
+                _HEALTHY_CACHE["loaded_at"] = now
+        except Exception:
+            pass
+
+    data = _HEALTHY_CACHE["data"]
+    if not data:
+        return None
+
+    ip_to_ports = data.get("ip_to_ports", {})
+    if not ip_to_ports:
+        return None
+
+    # همه پورت‌ها
+    all_ports = []
+    for ip, ports in ip_to_ports.items():
+        all_ports.extend(ports)
+
+    if not all_ports:
+        return None
+
+    # hash از phone → انتخاب پورت ثابت
+    h = hash(phone) % len(all_ports)
+    port = all_ports[h]
+
+    return {
+        "proxy_type": "socks5",
+        "addr": "127.0.0.1",
+        "port": port,
+        "rdns": True,
+    }
+
+
+def make_client(session_string, proxy=None, phone=None):
+    """
+    اتصال مستقیم — proxy کاملاً نادیده گرفته می‌شه
+    """
+    client = TelegramClient(
+        StringSession(session_string),
+        Config.API_ID,
+        Config.API_HASH,
+    )
+    # ═══ هیچ set_proxy — مستقیم از IP سرور ═══
+    return client
+
+
+async def create_session(phone, cc=None, pc=None):
+    client = TelegramClient(StringSession(), Config.API_ID, Config.API_HASH)
+    try:
+        await client.connect()
+        if not await client.is_user_authorized():
+            await client.send_code_request(phone)
+            code = await cc() if cc else input("کد: ")
+            try:
+                await client.sign_in(phone, code)
+            except Exception as e:
+                if "password" in str(e).lower():
+                    pwd = await pc() if pc else input("رمز: ")
+                    await client.sign_in(password=pwd)
+                else:
+                    raise
+        ss = client.session.save()
+        me = await client.get_me()
+        db.debug_log("engine", "create_session", "OK", f"{phone} → @{me.username}")
+        return ss
+    except Exception as e:
+        db.debug_log("engine", "create_session", "ERROR", f"{phone}: {e}")
+        return None
+    finally:
+        await client.disconnect()
+
+
+async def instant_view(client, channel, message_ids):
+    try:
+        r = await client(functions.messages.GetMessagesViewsRequest(
+            peer=channel, id=message_ids, increment=True))
+        return {"ok": True, "result": r}
+    except FloodWaitError as e:
+        return {"ok": False, "flood": e.seconds, "error": f"FloodWait {e.seconds}s"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+async def health_check(client):
+    try:
+        me = await client.get_me()
+        return {"status": "ok", "user": me.username or me.first_name}
+    except FloodWaitError as e:
+        return {"status": "flood", "seconds": e.seconds}
+    except (AuthKeyError, SessionRevokedError):
+        return {"status": "dead"}
+    except UserDeactivatedBanError:
+        return {"status": "banned"}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}

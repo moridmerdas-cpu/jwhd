@@ -1,0 +1,300 @@
+from telethon import functions
+"""
+Listener — پردازش سریالی FIFO
+- ۱ worker (نه ۱۲) → هیچ overlap
+- بدون RATE (اکانت‌ها همه عضو کانال هستن، فقط view می‌زنن)
+- هر پست: 39 اکانت view در 2-4s
+- صف 5000 پستی برای حجم بالا
+- ۲ شیفت متصل، swap هر 120-180s
+"""
+import asyncio
+import sys
+import random
+import time as _time
+from pathlib import Path
+from datetime import datetime, timedelta
+from collections import Counter
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from config import Config
+from models import database as db
+from core.engine import instant_view
+from core.pool import POOL
+
+
+_VIEW_PAUSED = False
+_DEAD_PHONES = set()  # اکانت‌هایی که نمی‌تونن entity resolve کنن
+_ENTITY_FAIL_COUNT = {}
+_ENTITY_CACHE = {}
+
+
+def set_view_paused(p):
+    global _VIEW_PAUSED
+    _VIEW_PAUSED = p
+
+
+def is_view_paused():
+    return _VIEW_PAUSED
+
+
+class MultiTargetListener:
+    def __init__(self, admin_phone=None, poll_interval=0.5):
+        self.admin_phone = admin_phone
+        self.poll_interval = poll_interval
+        self.is_running = False
+        self.client = None
+        self.channel_entity = None
+        self.last_msg = 0
+        self.queue = asyncio.Queue(maxsize=5000)
+        self.worker_task = None
+        self.total_processed = 0
+
+    async def start(self):
+        if not Config.AUTO_VIEW_ENABLED:
+            return
+        self.is_running = True
+        db.debug_log("listener", "start", "OK", "serial FIFO")
+
+        if not POOL._initialized:
+            await POOL.init()
+
+        # scheduler
+        try:
+            from core.scheduler import AccountScheduler
+            s = AccountScheduler()
+            s.start()
+            self._scheduler = s
+        except Exception as e:
+            db.debug_log("listener", "scheduler", "ERROR", str(e))
+
+        # ۱ worker
+        self.worker_task = asyncio.create_task(self._worker())
+
+        # poll loop
+        while self.is_running:
+            try:
+                await self._ensure_client()
+                await self._poll()
+            except Exception as e:
+                db.debug_log("listener", "loop", "ERROR", f"{type(e).__name__}: {e}")
+                self.client = None
+                self.channel_entity = None
+                await asyncio.sleep(3)
+                continue
+            await asyncio.sleep(self.poll_interval)
+
+    async def _ensure_client(self):
+        if self.client is not None and self.client.is_connected():
+            return
+        for phone in POOL.all_phones:
+            if phone in POOL.blacklist:
+                continue
+            c = await POOL.get(phone)
+            if c is not None:
+                self.client = c
+                break
+        if self.client is None:
+            raise RuntimeError("هیچ اکانت سالمی نیست")
+
+        target = Config.TARGET_CHANNEL_ID or Config.TARGET_CHANNEL_USERNAME
+        self.channel_entity = await asyncio.wait_for(
+            self.client.get_entity(target), timeout=15)
+
+        msgs = await self.client.get_messages(self.channel_entity, limit=1)
+        if msgs:
+            self.last_msg = msgs[0].id
+            db.debug_log("listener", "init", "OK",
+                         f"📢 {self.channel_entity.title} | آخرین: {self.last_msg}")
+
+    async def _poll(self):
+        if self.client is None or self.channel_entity is None:
+            return
+        msgs = await asyncio.wait_for(
+            self.client.get_messages(self.channel_entity, limit=50),
+            timeout=15)
+        if not msgs:
+            return
+        new_msgs = [m for m in msgs if m.id > self.last_msg]
+        if not new_msgs:
+            return
+        new_msgs.sort(key=lambda m: m.id)
+        self.last_msg = new_msgs[-1].id
+        if _VIEW_PAUSED:
+            return
+        for m in new_msgs:
+            try:
+                self.queue.put_nowait(m.id)
+            except asyncio.QueueFull:
+                db.debug_log("listener", "queue", "WARN", "صف پر")
+        if new_msgs:
+            qsize = self.queue.qsize()
+            db.debug_log("listener", "queue_add", "OK",
+                         f"+{len(new_msgs)} پست | صف: {qsize}")
+            if qsize > 100:
+                db.debug_log("listener", "queue", "WARN",
+                             f"⚠️ صف بزرگ: {qsize} پست در انتظار")
+
+    async def _worker(self):
+        """تک worker — سریالی FIFO"""
+        while self.is_running:
+            try:
+                msg_id = await asyncio.wait_for(self.queue.get(), timeout=5)
+            except asyncio.TimeoutError:
+                continue
+            except Exception:
+                break
+            try:
+                await self._view_message(msg_id)
+                self.total_processed += 1
+            except Exception as e:
+                db.debug_log("listener", "worker", "ERROR", str(e))
+            finally:
+                try:
+                    self.queue.task_done()
+                except Exception:
+                    pass
+
+    async def _view_one(self, phone, msg_id):
+        try:
+            c = POOL.clients.get(phone)
+            if c is None or not c.is_connected():
+                c = await POOL.get(phone)
+                if c is None:
+                    # ═══ Failover: تلاش دوباره ═══
+                    await asyncio.sleep(0.5)
+                    c = await POOL.get(phone)
+                    if c is None:
+                        return ("NO_CLI", phone)
+
+            # ═══ Skip dead phones ═══
+            if phone in _DEAD_PHONES:
+                return ("DEAD", phone)
+
+            target = Config.TARGET_CHANNEL_ID or Config.TARGET_CHANNEL_USERNAME
+            key = (phone, str(target))
+            ent = _ENTITY_CACHE.get(key)
+            if ent is None:
+                # فقط ۱ تلاش کوتاه
+                try:
+                    ent = await asyncio.wait_for(c.get_entity(target), timeout=8)
+                    _ENTITY_CACHE[key] = ent
+                    _ENTITY_FAIL_COUNT[phone] = 0
+                except Exception as e:
+                    _ENTITY_FAIL_COUNT[phone] = _ENTITY_FAIL_COUNT.get(phone, 0) + 1
+                    # بعد 2 بار fail، برای همیشه skip
+                    if _ENTITY_FAIL_COUNT[phone] >= 2:
+                        _DEAD_PHONES.add(phone)
+                        db.debug_log("listener", "dead", "WARN",
+                                     f"{phone} → dead (entity fail)")
+                    return (f"ENT:{type(e).__name__}", phone)
+
+            try:
+                r = await asyncio.wait_for(
+                    instant_view(c, ent, [msg_id]), timeout=10)
+            except asyncio.TimeoutError:
+                return ("V_TIMEOUT", phone)
+            except Exception as e:
+                return (f"V:{type(e).__name__}", phone)
+
+            if r.get("ok"):
+                return ("OK", phone)
+            elif "flood" in r:
+                u = (datetime.utcnow() + timedelta(seconds=r["flood"])).isoformat()
+                db.update_account_status(phone, "flood", r["error"], u)
+                return (f"FLOOD:{r['flood']}", phone)
+            else:
+                return (f"E:{str(r.get('error',''))[:20]}", phone)
+        except Exception as e:
+            return (f"OUT:{type(e).__name__}", phone)
+
+    async def _view_message(self, msg_id):
+        """پردازش یه پست"""
+        # ═══ Anti-Lock check ═══
+        if ANTI_LOCK.paused:
+            if ANTI_LOCK.should_resume():
+                ANTI_LOCK.resume()
+            else:
+                remaining = ANTI_LOCK.remaining_pause()
+                db.debug_log("listener", "view_paused", "WARN",
+                             f"ID={msg_id} | paused ({remaining}s)")
+                return
+
+        phones = list(POOL.active_phones())
+
+        # ═══ Fallback: اگه شیفت فعال خالی، از شیفت دیگه استفاده کن ═══
+        if not phones:
+            other = POOL.shift_b if POOL.active_shift == "A" else POOL.shift_a
+            phones = list(other)
+            if phones:
+                db.debug_log("listener", "fallback", "WARN",
+                             f"شیفت فعال خالی → {len(phones)} اکانت از شیفت دیگه")
+
+        if not phones:
+            return
+
+        # ═══ Pre-resolve entity برای همه اکانت‌ها (1 بار) ═══
+        target = Config.TARGET_CHANNEL_ID or Config.TARGET_CHANNEL_USERNAME
+        missing = [p for p in phones if (p, str(target)) not in _ENTITY_CACHE]
+        if missing:
+            async def pre(phone):
+                c = POOL.clients.get(phone)
+                if c is None or not c.is_connected():
+                    c = await POOL.get(phone)
+                    if c is None:
+                        return
+                try:
+                    ent = await asyncio.wait_for(c.get_entity(target), timeout=10)
+                    _ENTITY_CACHE[(phone, str(target))] = ent
+                except Exception:
+                    pass
+
+            await asyncio.gather(*[pre(p) for p in missing], return_exceptions=True)
+
+        random.shuffle(phones)
+        n = len(phones)
+        window = random.uniform(0.5, 1.5)
+
+        t0 = _time.time()
+
+        async def one(phone, delay):
+            if delay > 0:
+                await asyncio.sleep(delay)
+            return await self._view_one(phone, msg_id)
+
+        tasks = []
+        for i, phone in enumerate(phones):
+            d = (i / max(n, 1)) * window + random.uniform(0, 0.2)
+            tasks.append(asyncio.create_task(one(phone, d)))
+
+        try:
+            results = await asyncio.wait_for(
+                asyncio.gather(*tasks, return_exceptions=True),
+                timeout=window + 15)
+        except asyncio.TimeoutError:
+            results = []
+            for t in tasks:
+                if not t.done():
+                    t.cancel()
+
+        reasons = Counter()
+        suc = 0
+        for r in results:
+            if isinstance(r, tuple) and r:
+                reason = r[0]
+                reasons[reason] += 1
+                if reason == "OK":
+                    suc += 1
+
+        elapsed = _time.time() - t0
+        summary = " | ".join(f"{k}={v}" for k, v in reasons.most_common(5))
+        db.debug_log("listener", "view_done", "RESULT",
+                     f"ID={msg_id} | {POOL.active_shift} | {suc}/{n} | {elapsed:.1f}s | {summary} | صف:{self.queue.qsize()}")
+
+    async def stop(self):
+        self.is_running = False
+        if self.worker_task:
+            self.worker_task.cancel()
+
+
+class ChannelListener(MultiTargetListener):
+    pass

@@ -1,0 +1,331 @@
+"""
+Connection Pool حرفه‌ای
+- کلاینت‌های فعال همیشه باز می‌مونن
+- Device fingerprint متفاوت برای هر اکانت
+- Rate limiting هوشمند
+"""
+import asyncio
+import hashlib
+import random
+import time
+from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from config import Config
+from models import database as db
+from core.engine import make_client
+
+
+# ═══ Device Fingerprint Generator ═══
+DEVICES = [
+    ("Samsung Galaxy S23", "Android 13", "10.2.0"),
+    ("Samsung Galaxy S22", "Android 12", "10.0.1"),
+    ("Xiaomi 13 Pro", "Android 13", "10.2.0"),
+    ("Xiaomi Redmi Note 12", "Android 12", "9.7.1"),
+    ("iPhone 14 Pro", "iOS 16.5", "10.1.1"),
+    ("iPhone 13", "iOS 15.7", "9.9.5"),
+    ("Google Pixel 7", "Android 13", "10.2.0"),
+    ("OnePlus 11", "Android 13", "10.1.2"),
+    ("Huawei P50", "Android 12", "9.6.0"),
+    ("Oppo Find X5", "Android 12", "9.8.1"),
+    ("Vivo V25", "Android 12", "9.7.0"),
+    ("Realme GT 2", "Android 12", "9.6.5"),
+    ("Asus ROG Phone 6", "Android 13", "10.2.0"),
+    ("Sony Xperia 1 IV", "Android 12", "9.8.0"),
+    ("Nokia G50", "Android 12", "9.5.0"),
+]
+
+SYSTEM_VERSIONS = [
+    "SDK 33", "SDK 32", "SDK 31",
+    "10.2.0 (3964)", "10.0.1 (3810)", "9.7.1 (3682)",
+]
+
+
+def _device_for(phone: str):
+    """انتخاب device ثابت بر اساس hash شماره"""
+    h = int(hashlib.md5(str(phone).encode()).hexdigest(), 16)
+    return DEVICES[h % len(DEVICES)]
+
+
+def _system_version_for(phone: str):
+    h = int(hashlib.md5((str(phone) + "_sv").encode()).hexdigest(), 16)
+    return SYSTEM_VERSIONS[h % len(SYSTEM_VERSIONS)]
+
+
+def make_client_fp(session_string, phone=None, proxy=None):
+    """ساخت کلاینت با device fingerprint"""
+    from telethon import TelegramClient
+    from telethon.sessions import StringSession
+
+    device, sys_ver, app_ver = _device_for(phone or "default")
+    system_version = _system_version_for(phone or "default")
+
+    client = TelegramClient(
+        StringSession(session_string),
+        Config.API_ID,
+        Config.API_HASH,
+        device_model=device,
+        system_version=system_version,
+        app_version=app_ver,
+        lang_code="en",
+        system_lang_code="en-US",
+    )
+
+    if proxy:
+        client.set_proxy(proxy)
+        return client
+
+    # انتخاب WARP
+    try:
+        from core.warp_pool import get_all_configs, get_port_from_conf
+        import json
+        hp_file = Config.BASE_DIR / "proxies" / "healthy_ports.json"
+        if hp_file.exists():
+            data = json.loads(hp_file.read_text())
+            ips = data.get("ips", [])
+            ip_to_ports = data.get("ip_to_ports", {})
+            if ips and phone:
+                h = int(hashlib.md5(str(phone).encode()).hexdigest(), 16)
+                chosen_ip = ips[h % len(ips)]
+                ports = ip_to_ports.get(chosen_ip, [])
+                if ports:
+                    port = ports[(h // len(ips)) % len(ports)]
+                    client.set_proxy({
+                        "proxy_type": "socks5",
+                        "addr": "127.0.0.1",
+                        "port": port,
+                        "rdns": True,
+                    })
+    except Exception:
+        pass
+
+    return client
+
+
+# ═══ Rate Limiter (Token Bucket) ═══
+class RateLimiter:
+    """نرخ اجازه برای هر اکانت — تطبیقی"""
+    def __init__(self):
+        self.state = {}  # phone -> {rate, tokens, last}
+
+    def allow(self, phone):
+        """آیا الان می‌تونه سین بزنه"""
+        now = time.time()
+        s = self.state.get(phone)
+        if not s:
+            s = {"rate": 3.0, "tokens": 3.0, "last": now, "penalty": 0}
+            self.state[phone] = s
+
+        # پر کردن token
+        dt = now - s["last"]
+        s["tokens"] = min(s["rate"], s["tokens"] + dt * s["rate"])
+        s["last"] = now
+
+        if s["tokens"] >= 1:
+            s["tokens"] -= 1
+            return True
+        return False
+
+    def penalty(self, phone, seconds=60):
+        """وقتی flood خورد، جریمه"""
+        s = self.state.get(phone)
+        if not s:
+            s = {"rate": 3.0, "tokens": 3.0, "last": time.time(), "penalty": 0}
+            self.state[phone] = s
+        s["rate"] = max(0.1, s["rate"] * 0.5)
+        s["tokens"] = 0
+        s["penalty"] = time.time() + seconds
+
+    def reward(self, phone):
+        """موفقیت → آهسته سرعت رو زیاد کن"""
+        s = self.state.get(phone)
+        if not s:
+            return
+        s["rate"] = min(5.0, s["rate"] * 1.05)
+
+
+RATE = RateLimiter()
+
+
+# ═══ Client Pool ═══
+class ClientPool:
+    def __init__(self, target_size=75):
+        self.target_size = target_size
+        self.clients = {}
+        self.phones = []
+        self.lock = asyncio.Lock()
+        self.current_shift = None
+        self.fail_count = {}
+        self.blacklist = set()
+        self._connecting = set()  # در حال connect
+        self._connect_lock = asyncio.Lock()  # فقط برای connect
+
+    async def get(self, phone, skip_reconnect=False):
+        """گرفتن client — با قفل session برای جلوگیری از AuthKeyDuplicated"""
+        # چک سریع: اگه کلاینت زنده داری، همون رو بده
+        c = self.clients.get(phone)
+        if c is not None and c.is_connected():
+            return c
+
+        if skip_reconnect:
+            return None
+        if phone in self.blacklist:
+            return None
+        if phone in self._connecting:
+            return None
+
+        # قفل سشن — اینطوری مطمئنیم یه سشن فقط یه بار connect می‌شه
+        from core.session_lock import get_lock
+        session_lock = get_lock(phone)
+
+        self._connecting.add(phone)
+        try:
+            # منتظر بمون با timeout 10 ثانیه (اگه بیشتر شد، رد کن)
+            try:
+                await asyncio.wait_for(session_lock.acquire(), timeout=10)
+            except asyncio.TimeoutError:
+                db.debug_log("pool", "lock", "TIMEOUT", f"{phone}")
+                return None
+
+            try:
+                # بعد از گرفتن قفل، چک کن یه بار دیگه (شاید کسی دیگه connect کرده)
+                c = self.clients.get(phone)
+                if c is not None and c.is_connected():
+                    return c
+
+                # اگه کلاینت قبلی مرده، از clients پاکش کن
+                old = self.clients.pop(phone, None)
+                if old:
+                    try:
+                        await old.disconnect()
+                    except Exception:
+                        pass
+                    await asyncio.sleep(1)  # مکث کوتاه بعد disconnect
+
+                ss = db.get_session(phone)
+                if not ss:
+                    return None
+
+                try:
+                    c = make_client_fp(ss, phone=phone)
+                    await asyncio.wait_for(c.connect(), timeout=15)
+                    # چک authorize
+                    ok = await asyncio.wait_for(c.is_user_authorized(), timeout=10)
+                    if not ok:
+                        await c.disconnect()
+                        db.debug_log("pool", "auth", "FAIL", f"{phone}")
+                        return None
+                    self.clients[phone] = c
+                    self.fail_count[phone] = 0
+                    db.debug_log("pool", "connect", "OK",
+                                 f"{phone} ({len(self.clients)} فعال)")
+                    return c
+                except asyncio.TimeoutError:
+                    self.fail_count[phone] = self.fail_count.get(phone, 0) + 1
+                    db.debug_log("pool", "new", "TIMEOUT", f"{phone}")
+                    return None
+                except Exception as e:
+                    self.fail_count[phone] = self.fail_count.get(phone, 0) + 1
+                    if self.fail_count[phone] >= 5:
+                        self.blacklist.add(phone)
+                        db.debug_log("pool", "blacklist", "WARN", f"{phone}")
+                    db.debug_log("pool", "new", "ERROR", f"{phone}: {type(e).__name__}")
+                    return None
+            finally:
+                session_lock.release()
+
+        finally:
+            self._connecting.discard(phone)
+
+    async def drop(self, phone):
+        # اگه اکانت ادمین (اولین) باشه، drop نکن (چون listener ازش استفاده می‌کنه)
+        try:
+            from models import database as db
+            accounts = db.get_all_accounts()
+            if accounts and accounts[0]["phone"] == phone:
+                db.debug_log("pool", "drop", "SKIP", f"{phone} = ادمین")
+                return
+        except Exception:
+            pass
+
+        async with self.lock:
+            c = self.clients.pop(phone, None)
+            if c:
+                try:
+                    await c.disconnect()
+                    db.debug_log("pool", "drop", "OK", phone)
+                except Exception:
+                    pass
+
+    async def set_shift(self, shift):
+        if self.current_shift == shift:
+            return
+        async with self.lock:
+            # اگه قبلاً shift داشتیم و کلاینت‌ها هنوز زنده‌ن، نگهشون دار
+            if self.current_shift is not None and len(self.clients) > 20:
+                db.debug_log("pool", "shift", "SKIP",
+                             f"شیفت {shift} — client موجود حفظ شد ({len(self.clients)})")
+                self.current_shift = shift
+                return
+
+            db.debug_log("pool", "shift", "START", f"→ {shift}")
+            self.blacklist = set()  # ریست بلاک‌لیست
+            self.fail_count = {}
+            for c in list(self.clients.values()):
+                try:
+                    await c.disconnect()
+                except Exception:
+                    pass
+            self.clients = {}
+            self.phones = []
+
+            # اکانت‌های جدید
+            accounts = db.get_accounts_by_shift(shift)
+            if not accounts:
+                accounts = db.get_all_accounts()
+
+            healthy = [a for a in accounts 
+                       if a["status"] not in ("flood", "error")
+                       and a["phone"] not in self.blacklist][:self.target_size]
+            self.phones = [a["phone"] for a in healthy]
+            self.current_shift = shift
+
+            db.debug_log("pool", "shift", "OK", f"شیفت {shift}: {len(self.phones)} اکانت")
+
+            # pre-connect همه در پس‌زمینه
+            asyncio.create_task(self._preconnect())
+
+    async def _preconnect(self):
+        """اتصال اولیه همه اکانت‌ها (5 تایی موازی)"""
+        db.debug_log("pool", "preconnect", "START", "شروع اتصال اولیه")
+        sem = asyncio.Semaphore(15)
+
+        ok = 0
+        async def one(phone):
+            nonlocal ok
+            async with sem:
+                r = await self.get(phone)
+                if r is not None:
+                    ok += 1
+                    if ok % 10 == 0:
+                        db.debug_log("pool", "preconnect", "PROG", f"{ok}/{len(self.phones)}")
+                return r
+
+        tasks = [one(p) for p in self.phones]
+        await asyncio.gather(*tasks, return_exceptions=True)
+        db.debug_log("pool", "preconnect", "OK", f"{ok}/{len(self.phones)} وصل شد")
+
+    async def close_all(self):
+        async with self.lock:
+            for c in self.clients.values():
+                try:
+                    await c.disconnect()
+                except Exception:
+                    pass
+            self.clients = {}
+            self.phones = []
+            self.current_shift = None
+
+
+POOL = ClientPool()

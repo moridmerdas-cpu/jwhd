@@ -1,0 +1,256 @@
+"""
+Listener — شنونده کانال
+- یه client (از pool) poll می‌کنه
+- پیام جدید → شیفت فعال view می‌زنن
+- views پخش‌شده در 20-40 ثانیه (نه 1 ثانیه)
+"""
+import asyncio
+import sys
+import random
+import time as _time
+from pathlib import Path
+from datetime import datetime, timedelta
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from config import Config
+from models import database as db
+from core.engine import instant_view
+from core.pool import POOL, RATE
+
+
+_VIEW_PAUSED = False
+
+
+def set_view_paused(paused):
+    global _VIEW_PAUSED
+    _VIEW_PAUSED = paused
+    return _VIEW_PAUSED
+
+
+def is_view_paused():
+    return _VIEW_PAUSED
+
+
+class MultiTargetListener:
+    def __init__(self, admin_phone=None, poll_interval=2):
+        self.admin_phone = admin_phone
+        self.poll_interval = poll_interval
+        self.is_running = False
+        self.client = None
+        self.peer_id = None
+        self.channel_entity = None
+        self.last_msg = 0
+        self._view_tasks = set()
+
+    async def start(self):
+        if not Config.AUTO_VIEW_ENABLED:
+            db.debug_log("listener", "start", "SKIP", "AUTO_VIEW خاموش")
+            return
+
+        self.is_running = True
+        db.debug_log("listener", "start", "OK", "Listener شروع")
+
+        while self.is_running:
+            try:
+                await self._ensure_client()
+                await self._poll()
+            except Exception as e:
+                db.debug_log("listener", "loop", "ERROR",
+                             f"{type(e).__name__}: {e}")
+                self.client = None
+                self.channel_entity = None
+                await asyncio.sleep(5)
+                continue
+            await asyncio.sleep(self.poll_interval)
+
+    async def _ensure_client(self):
+        if self.client is not None and self.client.is_connected():
+            return
+
+        accounts = db.get_all_accounts()
+        if not accounts:
+            raise RuntimeError("هیچ اکانتی نیست")
+
+        # دنبال اولین اکانت سالم
+        for acc in accounts:
+            phone = acc["phone"]
+            if phone in POOL.blacklist:
+                continue
+            c = await POOL.get(phone)
+            if c is not None:
+                self.client = c
+                break
+
+        if self.client is None:
+            raise RuntimeError("هیچ اکانت سالمی نیست")
+
+        # دریافت کانال
+        target = Config.TARGET_CHANNEL_USERNAME or Config.TARGET_CHANNEL_ID
+        self.channel_entity = await asyncio.wait_for(
+            self.client.get_entity(target), timeout=15)
+
+        # peer_id برای view
+        # ═══ از entity استفاده کن، نه int منفی ═══
+        self.peer_id = self.channel_entity
+        db.debug_log("listener", "peer_set", "OK",
+                     f"peer_id = {type(self.channel_entity).__name__} (entity)")
+
+        # init pointer
+        msgs = await self.client.get_messages(self.channel_entity, limit=1)
+        if msgs:
+            self.last_msg = msgs[0].id
+            db.debug_log("listener", "init", "OK",
+                         f"📢 {self.channel_entity.title} | آخرین: {self.last_msg}")
+        else:
+            self.last_msg = 0
+            db.debug_log("listener", "init", "OK", "کانال خالی")
+
+    async def _poll(self):
+        if self.client is None or self.channel_entity is None:
+            return
+
+        msgs = await asyncio.wait_for(
+            self.client.get_messages(self.channel_entity, limit=10),
+            timeout=15)
+        if not msgs:
+            return
+
+        new_msgs = [m for m in msgs if m.id > self.last_msg]
+        if not new_msgs:
+            return
+
+        # جدیدترین ID
+        new_msgs.sort(key=lambda m: m.id)
+        self.last_msg = new_msgs[-1].id
+
+        if _VIEW_PAUSED:
+            db.debug_log("listener", "pause", "SKIP",
+                         f"{len(new_msgs)} پیام (توقف فعال)")
+            return
+
+        for m in new_msgs:
+            db.debug_log("listener", "new_msg", "OK",
+                         f"📩 ID={m.id} | شیفت: {POOL.active_shift}")
+            t = asyncio.create_task(self._view_message(m.id))
+            self._view_tasks.add(t)
+            t.add_done_callback(self._view_tasks.discard)
+
+    async def _view_message(self, msg_id):
+        phones = list(POOL.active_phones())
+        if not phones:
+            db.debug_log("listener", "view", "WARN", "شیفت خالی")
+            return
+
+        active = [p for p in phones if p not in POOL.blacklist]
+        if not active:
+            return
+
+        not_conn = [p for p in active if p not in POOL.clients or not POOL.clients[p].is_connected()]
+        if not_conn:
+            await asyncio.gather(*[POOL.get(p) for p in not_conn], return_exceptions=True)
+
+        random.shuffle(active)
+        window = random.uniform(30.0, 45.0)
+        n = len(active)
+        t0 = _time.time()
+
+        # ═══ بدون Semaphore — delay خودش throttling رو انجام می‌ده ═══
+        async def one(phone, delay):
+            if delay > 0:
+                await asyncio.sleep(delay)
+            return await self._view_one(phone, msg_id)
+
+        tasks = []
+        for i, phone in enumerate(active):
+            base_delay = (i / max(n, 1)) * window
+            jitter = random.uniform(0, 1.5)
+            tasks.append(asyncio.create_task(one(phone, base_delay + jitter)))
+
+        try:
+            results = await asyncio.wait_for(
+                asyncio.gather(*tasks, return_exceptions=True),
+                timeout=window + 120)
+        except asyncio.TimeoutError:
+            results = []
+            for t in tasks:
+                if not t.done():
+                    t.cancel()
+
+        from collections import Counter
+        reasons = Counter()
+        suc = 0
+        for r in results:
+            if isinstance(r, tuple) and len(r) >= 1:
+                reason = r[0]
+                reasons[reason] += 1
+                if reason == "OK":
+                    suc += 1
+            elif r is True:
+                suc += 1
+                reasons["OK"] += 1
+            elif r is False:
+                reasons["FALSE"] += 1
+            elif isinstance(r, Exception):
+                reasons[f"EXC:{type(r).__name__}"] += 1
+
+        elapsed = _time.time() - t0
+        summary = " | ".join(f"{k}={v}" for k, v in reasons.most_common(6))
+        db.debug_log("listener", "view_done", "RESULT",
+                     f"ID={msg_id} | شیفت={POOL.active_shift} | "
+                     f"موفق: {suc}/{n} | {elapsed:.0f}s | {summary}")
+
+    async def _view_one(self, phone, msg_id):
+        """view با تشخیص دقیق خطا"""
+        try:
+            if not RATE.allow(phone):
+                return ("RATE_BLOCK", phone)
+
+            c = POOL.clients.get(phone)
+            if c is None or not c.is_connected():
+                c = await POOL.get(phone)
+                if c is None:
+                    return ("NO_CLIENT", phone)
+
+            # resolve entity (با کش)
+            peer = POOL.entity_cache.get((phone, str(self.peer_id)))
+            if peer is None:
+                try:
+                    peer = await asyncio.wait_for(
+                        c.get_entity(self.peer_id), timeout=10)
+                    POOL.entity_cache[(phone, str(self.peer_id))] = peer
+                except Exception as e:
+                    return (f"ENT_ERR:{type(e).__name__}", phone)
+
+            # view
+            try:
+                r = await asyncio.wait_for(
+                    instant_view(c, peer, [msg_id]), timeout=15)
+            except asyncio.TimeoutError:
+                return ("VIEW_TIMEOUT", phone)
+            except Exception as e:
+                return (f"VIEW_EXC:{type(e).__name__}", phone)
+
+            if r.get("ok"):
+                db.update_account_status(phone, "online")
+                RATE.reward(phone)
+                return ("OK", phone)
+            elif "flood" in r:
+                u = (datetime.utcnow() + timedelta(seconds=r["flood"])).isoformat()
+                db.update_account_status(phone, "flood", r["error"], u)
+                RATE.penalty(phone, r["flood"])
+                return (f"FLOOD:{r['flood']}s", phone)
+            else:
+                err = r.get("error", "unknown")
+                return (f"VIEW_ERR:{err[:40]}", phone)
+        except Exception as e:
+            return (f"OUTER:{type(e).__name__}", phone)
+
+    async def stop(self):
+        self.is_running = False
+        for t in list(self._view_tasks):
+            t.cancel()
+        db.debug_log("listener", "stop", "OK", "متوقف")
+
+
+class ChannelListener(MultiTargetListener):
+    pass
