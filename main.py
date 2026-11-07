@@ -161,7 +161,6 @@ def build_app() -> web.Application:
 
     # health check برای Render
     app.router.add_get("/", health)
-    app.router.add_head("/", health)
 
     SimpleRequestHandler(
         dispatcher=dp,
