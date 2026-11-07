@@ -33,7 +33,10 @@ class ClientPool:
         self.active_shift = 1
         self.lock = asyncio.Lock()
         self._initialized = False
-        self.blacklist = set()
+        self.blacklist = set()          # فقط اکانت‌های بدون session
+        self.errors = {}                # phone -> آخرین دلیل شکست اتصال
+        self._retry_after = {}          # phone -> زمانی که اجازه تلاش مجدد داریم
+        self._bg = set()
 
     async def init(self):
         if self._initialized:
@@ -85,30 +88,74 @@ class ClientPool:
             tasks = [asyncio.create_task(one(p)) for p in phones]
             await asyncio.gather(*tasks, return_exceptions=True)
             db.debug_log("pool", "init", "DONE", f"connected:{ok[0]}/{n}")
-            await asyncio.to_thread(self.sync_status)
+            await asyncio.to_thread(self._safe_sync)
 
-    async def _connect_one(self, phone):
+    async def _connect_one(self, phone, force=False):
         if phone in self.blacklist:
             return None
         c = self.clients.get(phone)
         if c is not None and c.is_connected():
             return c
-        ss = db.get_session(phone)
-        if not ss:
-            self.blacklist.add(phone)
+        now = _time.time()
+        if not force and self._retry_after.get(phone, 0) > now:
             return None
         try:
+            ss = db.get_session(phone)
+            if not ss:
+                self.blacklist.add(phone)
+                raise RuntimeError("session خالیه")
             client = make_client(ss, phone=phone)
             await asyncio.wait_for(client.connect(), timeout=25)
             ok = await asyncio.wait_for(client.is_user_authorized(), timeout=10)
             if not ok:
                 await client.disconnect()
-                return None
+                raise RuntimeError("session معتبر نیست (unauthorized)")
             self.clients[phone] = client
+            self._retry_after.pop(phone, None)
+            if self.errors.pop(phone, None) is not None:
+                db.update_account_status(phone, "idle", None)
             return client
-        except Exception:
-            self.blacklist.add(phone)
+        except Exception as e:
+            reason = f"{type(e).__name__}: {str(e)[:120]}"
+            if type(e).__name__ == "InvalidToken":
+                reason = "InvalidToken: ENCRYPTION_KEY با کلید زمان ذخیره‌ی session فرق داره"
+            self.errors[phone] = reason
+            self._retry_after[phone] = now + 90
+            db.debug_log("pool", "connect", "ERROR", f"{phone}: {reason}")
+            try:
+                db.update_account_status(phone, "error", reason)
+            except Exception:
+                pass
             return None
+
+    async def ensure_connected(self, phones, force=False, limit=10):
+        sem = asyncio.Semaphore(limit)
+
+        async def one(p):
+            async with sem:
+                c = self.clients.get(p)
+                if c is not None and c.is_connected():
+                    return
+                await self._connect_one(p, force=force)
+
+        await asyncio.gather(*(one(p) for p in phones), return_exceptions=True)
+
+    async def activate_shift(self, shift):
+        """شیفت رو فعال می‌کنه، اکانت‌هاش رو واقعاً وصل می‌کنه، وضعیت‌ها رو sync می‌کنه و گزارش می‌ده."""
+        self.active_shift = shift
+        phones = list(self.shifts.get(shift, []))
+        await self.ensure_connected(phones, force=True)
+        await asyncio.to_thread(self._safe_sync)
+        live = [p for p in phones if self._is_live(p)]
+        return {
+            "total": len(phones),
+            "connected": len(live),
+            "errors": {p: self.errors[p] for p in phones if p in self.errors},
+        }
+
+    def _is_live(self, phone):
+        c = self.clients.get(phone)
+        return c is not None and c.is_connected()
 
     async def get(self, phone):
         c = self.clients.get(phone)
@@ -126,14 +173,30 @@ class ClientPool:
 
     def sync_status(self):
         """اکانت‌های متصلِ شیفت فعال = online، بقیه = idle (استراحت). flood/error دست نمی‌خوره."""
-        on  = [p for p in self.shifts.get(self.active_shift, []) if p in self.clients]
+        on  = [p for p in self.shifts.get(self.active_shift, []) if self._is_live(p)]
         off = [p for p in self.all_phones if p not in on]
         db.set_status_bulk(on, "online")
         db.set_status_bulk(off, "idle")
+        db.debug_log("pool", "sync", "OK",
+                     f"shift={self.active_shift} online={len(on)} idle={len(off)}")
+
+    def _safe_sync(self):
+        try:
+            self.sync_status()
+        except Exception as e:
+            db.debug_log("pool", "sync", "ERROR", f"{type(e).__name__}: {e}")
 
     def request_status_sync(self):
+        async def job():
+            try:
+                await self.ensure_connected(self.shifts.get(self.active_shift, []))
+                await asyncio.to_thread(self._safe_sync)
+            except Exception as e:
+                db.debug_log("pool", "sync_job", "ERROR", f"{type(e).__name__}: {e}")
         try:
-            asyncio.get_running_loop().create_task(asyncio.to_thread(self.sync_status))
+            t = asyncio.get_running_loop().create_task(job())
+            self._bg.add(t)
+            t.add_done_callback(self._bg.discard)
         except RuntimeError:
             pass
 
@@ -149,8 +212,8 @@ class ClientPool:
             if phone in v:
                 v.remove(phone)
         self.shifts[sh].append(phone)
-        client = await self._connect_one(phone)
-        await asyncio.to_thread(self.sync_status)
+        client = await self._connect_one(phone, force=True)
+        await asyncio.to_thread(self._safe_sync)
         return client
 
     async def drop(self, phone):

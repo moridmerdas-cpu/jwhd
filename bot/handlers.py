@@ -488,16 +488,23 @@ async def cb_shift_select(cb: types.CallbackQuery):
     shift = int(cb.data.split(":")[2])
     from core.pool import POOL
     old = POOL.active_shift
-    POOL.active_shift = shift
+    await cb.answer(f"⏳ شیفت {old} → {shift} | در حال اتصال اکانت‌ها...")
     db.set_setting("active_shift", shift)
-    POOL.request_status_sync()
-    await cb.answer(f"✅ شیفت {old} → {shift}", show_alert=True)
     try:
-        await cb.message.edit_text(
-            f"🔢 <b>شیفت فعال</b>\n\n✅ شیفت <b>{shift}</b> فعال شد.",
-            reply_markup=shift_select_menu(shift),
-            parse_mode="HTML",
-        )
+        rep = await asyncio.wait_for(POOL.activate_shift(shift), timeout=90)
+    except Exception as e:
+        rep = {"total": len(POOL.shifts.get(shift, [])), "connected": 0,
+               "errors": {"-": f"{type(e).__name__}: {e}"}}
+    text = (
+        f"🔢 <b>شیفت فعال</b>\n\n✅ شیفت <b>{shift}</b> فعال شد.\n"
+        f"🟢 متصل: <b>{rep['connected']}/{rep['total']}</b>"
+    )
+    if rep["total"] == 0:
+        text += "\n\n⚠️ این شیفت هیچ اکانتی نداره."
+    for phone, err in list(rep["errors"].items())[:8]:
+        text += f"\n🔴 <code>{phone}</code>\n    <code>{err[:110]}</code>"
+    try:
+        await cb.message.edit_text(text, reply_markup=shift_select_menu(shift), parse_mode="HTML")
     except Exception:
         pass
 
