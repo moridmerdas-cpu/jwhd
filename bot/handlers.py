@@ -1,4 +1,4 @@
-"""هندلرهای کامل ربات — aiogram 3 / Python 3.14"""
+"""هندلرهای کامل ربات — aiogram 3"""
 import asyncio
 import sys
 from datetime import datetime
@@ -16,10 +16,10 @@ from config import Config
 from models import database as db
 from bot.keyboards import (
     main_menu, status_menu, accounts_menu, accounts_list_kb,
-    stats_menu, settings_menu, channel_menu, confirm_menu,
-    cancel_menu, view_toggle_menu,
+    stats_menu, settings_menu, group_menu, confirm_menu,
+    cancel_menu, view_toggle_menu, shift_select_menu, shift_timing_menu,
 )
-from bot.states import AddAccount
+from bot.states import AddAccount, SetShiftTiming, SetGroup
 
 router = Router()
 
@@ -44,13 +44,20 @@ async def guard(msg: types.Message) -> bool:
 guard_admin = guard
 
 
+def _get_group_id() -> int:
+    return int(db.get_setting("target_group_id", 0) or 0)
+
+
 # ─────────────────────────────────────────────────────────
 # /start  /help  /admin
 # ─────────────────────────────────────────────────────────
 @router.message(Command("start"))
 async def cmd_start(msg: types.Message):
     if not await guard(msg): return
-    total = len(db.get_all_accounts())
+    total    = len(db.get_all_accounts())
+    group_id = _get_group_id()
+    mn       = int(db.get_setting("shift_min_sec", Config.SHIFT_MIN_SEC)) // 60
+    mx       = int(db.get_setting("shift_max_sec", Config.SHIFT_MAX_SEC)) // 60
     await msg.answer(
         f"🌟 <b>{Config.BOT_NAME}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -58,8 +65,8 @@ async def cmd_start(msg: types.Message):
         f"🤖 این ربات سین‌زن حرفه‌ای شماست\n\n"
         f"📊 وضعیت سریع:\n"
         f"  👥 اکانت: <b>{total}</b>\n"
-        f"  📢 کانال: <code>{Config.TARGET_CHANNEL_USERNAME}</code>\n"
-        f"  ⏰ چرخش: هر ۲۵-۴۵ دقیقه\n\n"
+        f"  🎯 گروه: <code>{group_id or 'تنظیم نشده'}</code>\n"
+        f"  ⏰ چرخش: هر {mn}-{mx} دقیقه\n\n"
         f"👇 از منو انتخاب کنید:",
         reply_markup=main_menu(),
         parse_mode="HTML",
@@ -73,16 +80,15 @@ async def cmd_help(msg: types.Message):
     await msg.answer(
         "📖 <b>راهنمای استفاده</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "➕ <b>افزودن اکانت</b>: شماره رو وارد کن، کد رو بده، سشن ساخته می‌شه\n"
+        "➕ <b>افزودن اکانت</b>: شماره رو وارد کن، کد رو بده\n"
         "📊 <b>وضعیت زنده</b>: تعداد آنلاین/Flood/خطا\n"
         "👥 <b>مدیریت اکانت‌ها</b>: لیست، افزودن، چرخش، حذف\n"
         "📈 <b>آمار پیشرفته</b>: آمار ۲۴ ساعت، نمودار موفقیت\n"
         "🔄 <b>چرخش دستی</b>: تعویض فوری شیفت\n"
-        "📢 <b>کانال هدف</b>: عضویت، چک عضویت\n"
-        "⚙️ <b>تنظیمات</b>: طول شیفت، نگهبان، بکاپ\n\n"
+        "🎯 <b>گروه هدف</b>: تنظیم گروه، عضویت، چک\n"
+        "⚙️ <b>تنظیمات</b>: بازه شیفت، شیفت فعال، نگهبان\n\n"
         "💡 <b>نکات</b>:\n"
         "• بین هر اکانت ۳-۵ دقیقه صبر کن\n"
-        "• اکانت جدید خودکار عضو کانال می‌شه\n"
         "• اگه Flood دیدی، ۱۰ دقیقه صبر کن",
         reply_markup=main_menu(),
         parse_mode="HTML",
@@ -140,9 +146,7 @@ async def show_view_toggle(msg: types.Message):
     await msg.answer(
         f"🎬 <b>کنترل ویو زدن</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"وضعیت فعلی: <b>{status_txt}</b>\n\n"
-        f"💡 اگه ویو رو خاموش کنی، ربات پیام‌ها رو نمی‌بینه\n"
-        f"و سین نمی‌زنه. با روشن کردن دوباره فعال می‌شه.\n",
+        f"وضعیت فعلی: <b>{status_txt}</b>\n",
         reply_markup=view_toggle_menu(paused),
         parse_mode="HTML",
     )
@@ -167,9 +171,7 @@ async def cb_view_toggle(cb: types.CallbackQuery):
         await cb.message.edit_text(
             f"🎬 <b>کنترل ویو زدن</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"وضعیت فعلی: <b>{status_txt}</b>\n\n"
-            f"💡 اگه ویو رو خاموش کنی، ربات پیام‌ها رو نمی‌بینه\n"
-            f"و سین نمی‌زنه. با روشن کردن دوباره فعال می‌شه.\n",
+            f"وضعیت فعلی: <b>{status_txt}</b>\n",
             reply_markup=view_toggle_menu(paused),
             parse_mode="HTML",
         )
@@ -197,7 +199,7 @@ async def show_accounts(msg: types.Message):
 
 
 # ─────────────────────────────────────────────────────────
-# آمار / کانال / تنظیمات / چرخش دستی
+# آمار
 # ─────────────────────────────────────────────────────────
 @router.message(F.text.startswith("📈"))
 async def show_stats(msg: types.Message):
@@ -208,28 +210,279 @@ async def show_stats(msg: types.Message):
     )
 
 
-@router.message(F.text.startswith("📢"))
-async def show_channel(msg: types.Message):
+# ─────────────────────────────────────────────────────────
+# 🎯 گروه هدف
+# ─────────────────────────────────────────────────────────
+@router.message(F.text.startswith("🎯"))
+async def show_group(msg: types.Message):
     if not await guard(msg): return
+    group_id = _get_group_id()
     await msg.answer(
-        f"📢 <b>کانال هدف</b>\n"
+        f"🎯 <b>گروه هدف</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"🎯 نام: <code>{Config.TARGET_CHANNEL_USERNAME}</code>\n"
-        f"🆔 آیدی: <code>{Config.TARGET_CHANNEL_ID}</code>\n\n"
+        f"🆔 آیدی: <code>{group_id or 'تنظیم نشده'}</code>\n\n"
         f"👇 گزینه مورد نظر:",
-        reply_markup=channel_menu(), parse_mode="HTML",
+        reply_markup=group_menu(),
+        parse_mode="HTML",
     )
 
 
+@router.callback_query(F.data == "grp:set")
+async def cb_group_set(cb: types.CallbackQuery, state: FSMContext):
+    await cb.message.edit_text(
+        "🎯 <b>تنظیم گروه هدف</b>\n\n"
+        "آیدی گروه رو بفرست:\n"
+        "<code>-1001234567890</code>\n\n"
+        "💡 آیدی گروه معمولاً منفی و با -100 شروع می‌شه",
+        reply_markup=cancel_menu(),
+        parse_mode="HTML",
+    )
+    await state.set_state(SetGroup.waiting_id)
+    await cb.answer()
+
+
+@router.message(StateFilter(SetGroup.waiting_id))
+async def set_group_id(msg: types.Message, state: FSMContext):
+    if not await guard(msg): return
+    raw = msg.text.strip()
+    try:
+        gid = int(raw)
+    except ValueError:
+        await msg.answer("❌ آیدی اشتباه. باید عدد باشه مثل: <code>-1001234567890</code>", parse_mode="HTML")
+        return
+    db.set_setting("target_group_id", gid)
+    await msg.answer(
+        f"✅ گروه هدف تنظیم شد!\n"
+        f"🆔 <code>{gid}</code>\n\n"
+        f"⚠️ ربات رو ریستارت کن تا تغییر اعمال بشه.",
+        reply_markup=main_menu(),
+        parse_mode="HTML",
+    )
+    await state.clear()
+
+
+@router.callback_query(F.data.startswith("grp:"))
+async def cb_group(cb: types.CallbackQuery):
+    data     = cb.data.split(":")[1]
+    group_id = _get_group_id()
+
+    if data == "join":
+        await cb.answer("⏳ در حال عضویت همه اکانت‌ها...")
+        asyncio.create_task(_join_group_all_task(cb, group_id))
+
+    elif data == "check":
+        await cb.answer("⏳ در حال بررسی...")
+        asyncio.create_task(_check_group_join_task(cb, group_id))
+
+    elif data == "info":
+        await cb.answer(f"🎯 گروه: {group_id}", show_alert=True)
+
+    try:
+        await cb.answer()
+    except Exception:
+        pass
+
+
+async def _join_group_all_task(cb: types.CallbackQuery, group_id: int):
+    if not group_id:
+        await cb.message.answer("❌ گروه هدف تنظیم نشده")
+        return
+    try:
+        from core.engine import make_client
+        accounts = db.get_all_accounts()
+        joined   = 0
+        for a in accounts:
+            try:
+                ss = db.get_session(a["phone"])
+                c  = make_client(ss, phone=a["phone"])
+                await asyncio.wait_for(c.connect(), timeout=15)
+                entity = await c.get_entity(group_id)
+                from telethon.tl.functions.channels import JoinChannelRequest
+                await c(JoinChannelRequest(entity))
+                joined += 1
+                await c.disconnect()
+                await asyncio.sleep(2)
+            except Exception:
+                pass
+        await cb.message.answer(f"✅ {joined}/{len(accounts)} اکانت عضو گروه شدن")
+    except Exception as e:
+        await cb.message.answer(f"❌ {e}")
+
+
+async def _check_group_join_task(cb: types.CallbackQuery, group_id: int):
+    if not group_id:
+        await cb.message.answer("❌ گروه هدف تنظیم نشده")
+        return
+    try:
+        from core.engine import make_client
+        accounts = db.get_all_accounts()
+        joined   = 0
+        for a in accounts:
+            try:
+                ss = db.get_session(a["phone"])
+                c  = make_client(ss, phone=a["phone"])
+                await asyncio.wait_for(c.connect(), timeout=15)
+                entity = await c.get_entity(group_id)
+                from telethon.tl.functions.channels import GetParticipantRequest
+                await c(GetParticipantRequest(channel=entity, participant="me"))
+                joined += 1
+                await c.disconnect()
+            except Exception:
+                pass
+        await cb.message.answer(f"✅ {joined}/{len(accounts)} عضو گروه")
+    except Exception as e:
+        await cb.message.answer(f"❌ {e}")
+
+
+# ─────────────────────────────────────────────────────────
+# ⚙️ تنظیمات
+# ─────────────────────────────────────────────────────────
 @router.message(F.text.startswith("⚙️"))
 async def show_settings(msg: types.Message):
     if not await guard(msg): return
+    mn = int(db.get_setting("shift_min_sec", Config.SHIFT_MIN_SEC)) // 60
+    mx = int(db.get_setting("shift_max_sec", Config.SHIFT_MAX_SEC)) // 60
+    from core.pool import POOL
+    active = POOL.active_shift
     await msg.answer(
-        "⚙️ <b>تنظیمات</b>\n━━━━━━━━━━━━━━━━━━━━━━\n\n👇 گزینه مورد نظر:",
-        reply_markup=settings_menu(), parse_mode="HTML",
+        f"⚙️ <b>تنظیمات</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"⏱️ بازه شیفت: <b>{mn}-{mx} دقیقه</b>\n"
+        f"🔢 شیفت فعال: <b>{active}</b>\n\n"
+        f"👇 گزینه مورد نظر:",
+        reply_markup=settings_menu(),
+        parse_mode="HTML",
     )
 
 
+@router.callback_query(F.data.startswith("set:"))
+async def cb_settings(cb: types.CallbackQuery, state: FSMContext):
+    data = cb.data.split(":")[1]
+
+    if data == "shift_timing":
+        mn = int(db.get_setting("shift_min_sec", Config.SHIFT_MIN_SEC)) // 60
+        mx = int(db.get_setting("shift_max_sec", Config.SHIFT_MAX_SEC)) // 60
+        await cb.message.edit_text(
+            f"⏱️ <b>بازه تایم شیفت</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"⏰ فعلی: <b>{mn}-{mx} دقیقه</b>\n\n"
+            f"یه پیش‌فرض انتخاب کن یا دستی وارد کن:",
+            reply_markup=shift_timing_menu(),
+            parse_mode="HTML",
+        )
+
+    elif data == "shift_active":
+        from core.pool import POOL
+        active = POOL.active_shift
+        await cb.message.edit_text(
+            f"🔢 <b>انتخاب شیفت فعال</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"شیفت فعلی: <b>{active}</b>\n\n"
+            f"👇 شیفت مورد نظر رو انتخاب کن:",
+            reply_markup=shift_select_menu(active),
+            parse_mode="HTML",
+        )
+
+    elif data == "guardian":
+        await cb.answer("🛡️ نگهبان هر ۶۰ ثانیه چک می‌کنه", show_alert=True)
+
+    elif data == "backup":
+        try:
+            from core.backup import create_backup
+            f = create_backup()
+            await cb.answer(f"✅ بکاپ ساخته شد ({f.stat().st_size//1024}KB)", show_alert=True)
+        except Exception as e:
+            await cb.answer(f"❌ خطا: {e}", show_alert=True)
+
+    try:
+        await cb.answer()
+    except Exception:
+        pass
+
+
+# تنظیم بازه شیفت — پیش‌فرض
+@router.callback_query(F.data.startswith("stm:preset:"))
+async def cb_shift_timing_preset(cb: types.CallbackQuery):
+    _, _, mn_str, mx_str = cb.data.split(":")
+    mn = int(mn_str) * 60
+    mx = int(mx_str) * 60
+    db.set_setting("shift_min_sec", mn)
+    db.set_setting("shift_max_sec", mx)
+    await cb.answer(f"✅ بازه تنظیم شد: {mn_str}-{mx_str} دقیقه", show_alert=True)
+    try:
+        await cb.message.edit_text(
+            f"⏱️ <b>بازه شیفت</b>\n\n✅ تنظیم شد: <b>{mn_str}-{mx_str} دقیقه</b>\n\n"
+            f"شیفت بعدی این بازه رو استفاده می‌کنه.",
+            reply_markup=shift_timing_menu(),
+            parse_mode="HTML",
+        )
+    except Exception:
+        pass
+
+
+# تنظیم بازه شیفت — دستی
+@router.callback_query(F.data == "stm:custom")
+async def cb_shift_timing_custom(cb: types.CallbackQuery, state: FSMContext):
+    await cb.message.edit_text(
+        "⏱️ <b>بازه دلخواه</b>\n\n"
+        "دو عدد بفرست (دقیقه):\n"
+        "<code>حداقل حداکثر</code>\n\n"
+        "مثال: <code>20 60</code>",
+        reply_markup=cancel_menu(),
+        parse_mode="HTML",
+    )
+    await state.set_state(SetShiftTiming.waiting_range)
+    await cb.answer()
+
+
+@router.message(StateFilter(SetShiftTiming.waiting_range))
+async def set_shift_timing(msg: types.Message, state: FSMContext):
+    if not await guard(msg): return
+    parts = msg.text.strip().split()
+    if len(parts) != 2:
+        await msg.answer("❌ فرمت اشتباه. مثال: <code>20 60</code>", parse_mode="HTML")
+        return
+    try:
+        mn, mx = int(parts[0]), int(parts[1])
+        if mn < 1 or mx < mn + 1:
+            raise ValueError
+    except ValueError:
+        await msg.answer("❌ اعداد معتبر نیستن. حداقل باید کمتر از حداکثر باشه.", parse_mode="HTML")
+        return
+    db.set_setting("shift_min_sec", mn * 60)
+    db.set_setting("shift_max_sec", mx * 60)
+    await msg.answer(
+        f"✅ بازه شیفت تنظیم شد!\n"
+        f"⏱️ <b>{mn}-{mx} دقیقه</b>\n\n"
+        f"شیفت بعدی این بازه رو استفاده می‌کنه.",
+        reply_markup=main_menu(),
+        parse_mode="HTML",
+    )
+    await state.clear()
+
+
+# انتخاب شیفت فعال
+@router.callback_query(F.data.startswith("shift:select:"))
+async def cb_shift_select(cb: types.CallbackQuery):
+    shift = int(cb.data.split(":")[2])
+    from core.pool import POOL
+    old = POOL.active_shift
+    POOL.active_shift = shift
+    db.set_setting("active_shift", shift)
+    await cb.answer(f"✅ شیفت {old} → {shift}", show_alert=True)
+    try:
+        await cb.message.edit_text(
+            f"🔢 <b>شیفت فعال</b>\n\n✅ شیفت <b>{shift}</b> فعال شد.",
+            reply_markup=shift_select_menu(shift),
+            parse_mode="HTML",
+        )
+    except Exception:
+        pass
+
+
+# ─────────────────────────────────────────────────────────
+# چرخش دستی
+# ─────────────────────────────────────────────────────────
 @router.message(F.text.startswith("🔄"))
 async def manual_rotate(msg: types.Message):
     if not await guard(msg): return
@@ -387,10 +640,6 @@ async def cb_stats(cb: types.CallbackQuery):
     elif data == "daily":
         conn = db.get_conn()
         try:
-            total = conn.execute(
-                "SELECT COUNT(*) FROM debug_log WHERE step='new_post' AND message LIKE 'موفق%' "
-                "AND created_at >= datetime('now', '-24 hours')"
-            ).fetchone()[0]
             msgs = conn.execute(
                 "SELECT COUNT(*) FROM debug_log WHERE step='new_msg' "
                 "AND created_at >= datetime('now', '-24 hours')"
@@ -399,40 +648,25 @@ async def cb_stats(cb: types.CallbackQuery):
             conn.close()
         await cb.message.edit_text(
             f"📈 <b>آمار ۲۴ ساعت</b>\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"📨 پیام‌های جدید: <b>{msgs}</b>\n"
-            f"✅ سین‌های موفق: <b>{total}</b>\n",
+            f"📨 پیام‌های جدید: <b>{msgs}</b>\n",
             reply_markup=stats_menu(), parse_mode="HTML",
         )
 
-    elif data == "warp":
-        import json
-        try:
-            hp        = Config.BASE_DIR / "proxies" / "healthy_ports.json"
-            data_json = json.loads(hp.read_text()) if hp.exists() else {}
-            ips       = data_json.get("ips", [])
-            ports     = data_json.get("port_to_ip", {})
-            text = (
-                f"🌐 <b>وضعیت WARP</b>\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"🎯 IPهای یکتا: <b>{len(ips)}</b>\n"
-                f"🔌 پورت‌های سالم: <b>{len(ports)}</b>\n\n"
-            )
-            for ip in ips[:10]:
-                count = sum(1 for p, i in ports.items() if i == ip)
-                text += f"  <code>{ip}</code> ({count} پورت)\n"
-        except Exception as e:
-            text = f"❌ خطا: {e}"
-        await cb.message.edit_text(text, reply_markup=stats_menu(), parse_mode="HTML")
-
     elif data == "shift":
-        from core.scheduler import AccountScheduler
-        s   = AccountScheduler()
-        cur = s._current_shift or "?"
-        nxt = s._next_swap_at.strftime("%H:%M:%S") if s._next_swap_at else "?"
+        from core.scheduler import AccountScheduler, _STATE
+        from core.pool import POOL
+        cur = POOL.active_shift
+        nxt_dt = _STATE.get("next_swap_at")
+        nxt = nxt_dt.strftime("%H:%M:%S") if nxt_dt else "?"
+        last_iv = _STATE.get("last_interval", 0)
+        mn = int(db.get_setting("shift_min_sec", Config.SHIFT_MIN_SEC)) // 60
+        mx = int(db.get_setting("shift_max_sec", Config.SHIFT_MAX_SEC)) // 60
         await cb.message.edit_text(
             f"🔄 <b>وضعیت چرخه</b>\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"🟢 شیفت فعلی: <b>{cur}</b>\n"
+            f"🟢 شیفت فعال: <b>{cur}</b>\n"
             f"⏰ swap بعدی: <b>{nxt}</b>\n"
-            f"📊 بازه: <b>۲۵-۴۵ دقیقه تصادفی</b>",
+            f"⏱️ آخرین بازه: <b>{last_iv}s</b>\n"
+            f"📊 تنظیم فعلی: <b>{mn}-{mx} دقیقه</b>",
             reply_markup=stats_menu(), parse_mode="HTML",
         )
 
@@ -440,10 +674,9 @@ async def cb_stats(cb: types.CallbackQuery):
         conn = db.get_conn()
         try:
             rows = conn.execute(
-                "SELECT substr(created_at, 1, 13) as h, "
-                "SUM(CASE WHEN message LIKE 'موفق%' THEN 1 ELSE 0 END) as ok, "
-                "COUNT(*) as total "
-                "FROM debug_log WHERE step='new_post' AND created_at >= datetime('now', '-12 hours') "
+                "SELECT substr(created_at, 1, 13) as h, COUNT(*) as ok "
+                "FROM debug_log WHERE step='read_done' AND status='RESULT' "
+                "AND created_at >= datetime('now', '-12 hours') "
                 "GROUP BY h ORDER BY h"
             ).fetchall()
         finally:
@@ -460,77 +693,8 @@ async def cb_stats(cb: types.CallbackQuery):
 
 
 # ─────────────────────────────────────────────────────────
-# Callback: کانال
+# Callback: تایید
 # ─────────────────────────────────────────────────────────
-@router.callback_query(F.data.startswith("ch:"))
-async def cb_channel(cb: types.CallbackQuery):
-    data = cb.data.split(":")[1]
-    if data == "join":
-        await cb.answer("⏳ در حال عضویت همه اکانت‌ها...")
-        asyncio.create_task(_join_all_task(cb))
-    elif data == "check":
-        await cb.answer("⏳ در حال بررسی...")
-        asyncio.create_task(_check_join_task(cb))
-    elif data == "info":
-        await cb.answer(f"📢 {Config.TARGET_CHANNEL_USERNAME}", show_alert=True)
-    try:
-        await cb.answer()
-    except Exception:
-        pass
-
-
-async def _join_all_task(cb: types.CallbackQuery):
-    try:
-        from core.join_all import join_one
-        accounts = db.get_all_accounts()
-        joined   = sum(
-            1 for a in accounts
-            if (await join_one(a["phone"]))[1] in ("joined", "already")
-        )
-        await cb.message.answer(f"✅ {joined}/{len(accounts)} اکانت عضو کانال شدن")
-    except Exception as e:
-        await cb.message.answer(f"❌ {e}")
-
-
-async def _check_join_task(cb: types.CallbackQuery):
-    try:
-        from core.engine import make_client
-        accounts = db.get_all_accounts()
-        joined   = 0
-        for a in accounts:
-            try:
-                ss = db.get_session(a["phone"])
-                c  = make_client(ss, phone=a["phone"])
-                await asyncio.wait_for(c.connect(), timeout=15)
-                target = Config.TARGET_CHANNEL_USERNAME or Config.TARGET_CHANNEL_ID
-                entity = await c.get_entity(target)
-                from telethon.tl.functions.channels import GetParticipantRequest
-                await c(GetParticipantRequest(channel=entity, participant="me"))
-                joined += 1
-                await c.disconnect()
-            except Exception:
-                pass
-        await cb.message.answer(f"✅ {joined}/{len(accounts)} عضو کانال")
-    except Exception as e:
-        await cb.message.answer(f"❌ {e}")
-
-
-# ─────────────────────────────────────────────────────────
-# Callback: تنظیمات / تایید
-# ─────────────────────────────────────────────────────────
-@router.callback_query(F.data.startswith("set:"))
-async def cb_settings(cb: types.CallbackQuery):
-    data = cb.data.split(":")[1]
-    msgs = {
-        "shift":    "⏱️ طول شیفت: ۲۵-۴۵ دقیقه تصادفی",
-        "active":   f"👥 تعداد فعال: {Config.SHIFT_SIZE}",
-        "guardian": "🛡️ نگهبان هر ۶۰ ثانیه چک می‌کنه",
-        "backup":   "💾 هر ۱ ساعت بکاپ ساخته می‌شه",
-        "warp":     "📊 وضعیت WARP در آمار پیشرفته",
-    }
-    await cb.answer(msgs.get(data, ""), show_alert=True)
-
-
 @router.callback_query(F.data.startswith("cfm:"))
 async def cb_confirm(cb: types.CallbackQuery):
     d      = cb.data.split(":")
@@ -542,33 +706,31 @@ async def cb_confirm(cb: types.CallbackQuery):
 # ─────────────────────────────────────────────────────────
 # FSM: افزودن اکانت
 # ─────────────────────────────────────────────────────────
-async def _join_channel(client):
+async def _join_group(client):
+    group_id = _get_group_id()
+    if not group_id:
+        return
     try:
-        target = Config.TARGET_CHANNEL_USERNAME or Config.TARGET_CHANNEL_ID
-        if not target:
-            return
-        entity = await client.get_entity(target)
-        try:
-            from telethon.tl.functions.channels import JoinChannelRequest
-            await client(JoinChannelRequest(entity))
-        except Exception as e:
-            err = str(e).lower()
-            if "already" not in err and "participant" not in err:
-                db.debug_log("handlers", "join", "WARN", f"{type(e).__name__}")
+        entity = await client.get_entity(group_id)
+        from telethon.tl.functions.channels import JoinChannelRequest
+        await client(JoinChannelRequest(entity))
     except Exception as e:
-        db.debug_log("handlers", "join", "WARN", f"{type(e).__name__}")
+        err = str(e).lower()
+        if "already" not in err and "participant" not in err:
+            db.debug_log("handlers", "join_group", "WARN", f"{type(e).__name__}")
 
 
 @router.message(F.text.startswith("➕"))
 async def add_account_start(msg: types.Message, state: FSMContext):
     if not await guard_admin(msg): return
     await state.set_state(AddAccount.waiting_phone)
+    group_id = _get_group_id()
     await msg.answer(
         "➕ <b>افزودن اکانت جدید</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n\n"
         "شماره رو با فرمت بین‌المللی بفرست:\n"
         "<code>+989123456789</code>\n\n"
-        "💡 اکانت خودکار عضو کانال می‌شه.",
+        f"💡 اکانت خودکار عضو گروه می‌شه: <code>{group_id or 'تنظیم نشده'}</code>",
         reply_markup=cancel_menu(),
         parse_mode="HTML",
     )
@@ -597,7 +759,7 @@ async def add_phone(msg: types.Message, state: FSMContext):
         await state.set_state(AddAccount.waiting_code)
         await msg.answer("✉️ <b>کد ارسال شد</b>\n\nکد رو با اعداد انگلیسی وارد کن:", parse_mode="HTML")
     except asyncio.TimeoutError:
-        await msg.answer("❌ <b>Timeout</b>\nسرور تلگرام پاسخ نداد. دوباره تلاش کن.", parse_mode="HTML")
+        await msg.answer("❌ <b>Timeout</b>\nسرور تلگرام پاسخ نداد.", parse_mode="HTML")
         if c:
             try: await c.disconnect()
             except Exception: pass
@@ -631,7 +793,7 @@ async def add_code(msg: types.Message, state: FSMContext):
         await c.sign_in(phone, code, phone_code_hash=data["phone_code_hash"])
         ss   = c.session.save()
         me   = await c.get_me()
-        await _join_channel(c)
+        await _join_group(c)
         await c.disconnect()
         _pending.pop(msg.from_user.id, None)
         acc_id = db.add_account(phone, ss)
@@ -641,7 +803,7 @@ async def add_code(msg: types.Message, state: FSMContext):
             f"👤 نام: <b>{me.first_name}</b>\n"
             f"🆔 یوزرنیم: @{me.username or 'ندارد'}\n"
             f"🎫 شناسه: <code>{acc_id}</code>\n"
-            f"👥 عضو کانال: ✅",
+            f"👥 عضو گروه: ✅",
             reply_markup=main_menu(),
             parse_mode="HTML",
         )
@@ -672,7 +834,7 @@ async def add_password(msg: types.Message, state: FSMContext):
         await c.sign_in(password=pwd)
         ss     = c.session.save()
         me     = await c.get_me()
-        await _join_channel(c)
+        await _join_group(c)
         await c.disconnect()
         _pending.pop(msg.from_user.id, None)
         acc_id = db.add_account(phone, ss)
@@ -704,7 +866,7 @@ async def add_cancel(cb: types.CallbackQuery, state: FSMContext):
 
 
 # ─────────────────────────────────────────────────────────
-# register — aiogram 3: router پاس داده می‌شه به Dispatcher
+# register
 # ─────────────────────────────────────────────────────────
 def register_handlers(dp):
     dp.include_router(router)
