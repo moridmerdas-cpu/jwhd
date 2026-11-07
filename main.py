@@ -1,4 +1,4 @@
-"""نقطه ورود ربات — aiogram 3 webhook / Python 3.14"""
+"""نقطه ورود ربات — aiogram 3 webhook / Python 3.14 / group-only"""
 import asyncio
 import logging
 import sys
@@ -74,22 +74,51 @@ async def on_startup(app: web.Application):
         + " ".join(f"S{k}:{len(v)}" for k, v in POOL.shifts.items())
     )
 
-    # گروه هدف از DB
-    group_id = int(db.get_setting("target_group_id", 0) or 0)
-    auto_view = db.get_setting("auto_view_enabled", "1") == "1"
+    # Pre-warm: group entity cache
+    if Config.TARGET_GROUP_ID:
+        log.info("🔥 Pre-warming group entity cache...")
+        try:
+            from core.listener import _GROUP_ENTITY_CACHE
+            sem = asyncio.Semaphore(20)
 
-    if auto_view and group_id:
+            async def warm(phone):
+                try:
+                    c = POOL.clients.get(phone)
+                    if c is None:
+                        return False
+                    ent = await asyncio.wait_for(
+                        c.get_entity(Config.TARGET_GROUP_ID), timeout=10)
+                    _GROUP_ENTITY_CACHE[(phone, str(Config.TARGET_GROUP_ID))] = ent
+                    return True
+                except Exception:
+                    return False
+
+            async def one(p):
+                async with sem:
+                    return await warm(p)
+
+            results  = await asyncio.gather(
+                *[one(p) for p in POOL.all_phones if p in POOL.clients],
+                return_exceptions=True,
+            )
+            ok_count = sum(1 for r in results if r is True)
+            log.info(f"🔥 Group entity cache: {ok_count}/{len(POOL.clients)} آماده")
+        except Exception as e:
+            log.warning(f"Prewarm: {e}")
+
+    # Group Listener — تنها listener
+    if Config.AUTO_VIEW_ENABLED and Config.TARGET_GROUP_ID:
         try:
             from core.listener import GroupListener
             gl = GroupListener()
-            dp["group_listener"]             = gl
-            dp["group_listener_task"]        = asyncio.create_task(gl.start())
-            dp["group_listener_watchdog"]    = asyncio.create_task(group_listener_watchdog())
-            log.info(f"👥 Group Listener روشن — group={group_id}")
+            dp["group_listener"]               = gl
+            dp["group_listener_task"]          = asyncio.create_task(gl.start())
+            dp["group_listener_watchdog_task"] = asyncio.create_task(group_listener_watchdog())
+            log.info(f"👥 Group Listener روشن — group={Config.TARGET_GROUP_ID}")
         except Exception as e:
             log.exception(f"Group Listener: {e}")
     else:
-        log.warning("⚠️ گروه هدف تنظیم نشده — ویو غیرفعال")
+        log.warning("⚠️ TARGET_GROUP_ID تنظیم نشده — listener غیرفعال")
 
     webhook_url = f"{Config.WEBHOOK_BASE_URL}{Config.WEBHOOK_PATH}"
     await bot.set_webhook(
@@ -99,19 +128,19 @@ async def on_startup(app: web.Application):
     )
     log.info(f"🔗 Webhook ثبت شد: {webhook_url}")
 
-    mn = db.get_setting("shift_min_sec", Config.SHIFT_MIN_SEC)
-    mx = db.get_setting("shift_max_sec", Config.SHIFT_MAX_SEC)
-
     for admin_id in Config.ADMIN_IDS:
         try:
             await bot.send_message(
                 admin_id,
                 f"🚀 <b>{Config.BOT_NAME}</b> روشن شد!\n"
                 f"👥 اکانت: {len(POOL.clients)}/{len(POOL.all_phones)}\n"
-                f"🎯 گروه هدف: <code>{group_id or 'تنظیم نشده'}</code>\n"
-                f"⏱️ شیفت: {int(mn)//60}-{int(mx)//60} دقیقه تصادفی\n"
+                f"S1: {len(POOL.shifts.get(1, []))} | "
+                f"S2: {len(POOL.shifts.get(2, []))} | "
+                f"S3: {len(POOL.shifts.get(3, []))} | "
+                f"S4: {len(POOL.shifts.get(4, []))}\n"
                 f"✅ شیفت فعال: {POOL.active_shift}\n"
-                f"🌐 Webhook: {webhook_url}",
+                f"🌐 Webhook: {webhook_url}\n"
+                f"👥 گروه: <code>{Config.TARGET_GROUP_ID}</code>",
             )
         except Exception as e:
             log.warning(f"admin {admin_id}: {e}")
@@ -127,10 +156,10 @@ async def on_shutdown(app: web.Application):
     except Exception:
         pass
 
-    obj = dp.get("group_listener")
-    if obj:
+    gl = dp.get("group_listener")
+    if gl:
         try:
-            await asyncio.wait_for(obj.stop(), timeout=10)
+            await asyncio.wait_for(gl.stop(), timeout=10)
         except Exception:
             pass
 
@@ -150,17 +179,10 @@ async def on_shutdown(app: web.Application):
 
 
 # ── aiohttp app ────────────────────────────────────────
-async def health(request):
-    return web.Response(text="OK", status=200)
-
-
 def build_app() -> web.Application:
     app = web.Application()
     app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
-
-    # health check برای Render
-    app.router.add_get("/", health)
 
     SimpleRequestHandler(
         dispatcher=dp,
@@ -173,18 +195,16 @@ def build_app() -> web.Application:
 
 
 if __name__ == "__main__":
-    import os as _os
-    # Render متغیر PORT رو خودش ست می‌کنه — اولویت با اون
-    _port = int(_os.environ.get("PORT", Config.WEBHOOK_PORT))
     print(f"""
 ╔══════════════════════════════════════╗
 ║      🤖 {Config.BOT_NAME}
 ║      ادمین‌ها: {Config.ADMIN_IDS}
-║      پورت: {_port}
+║      پورت: {Config.WEBHOOK_PORT}
+║      گروه: {Config.TARGET_GROUP_ID}
 ╚══════════════════════════════════════╝
     """)
     web.run_app(
         build_app(),
-        host="0.0.0.0",
-        port=_port,
+        host=Config.WEBHOOK_HOST,
+        port=Config.WEBHOOK_PORT,
     )

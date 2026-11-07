@@ -8,10 +8,10 @@ from aiogram.utils.keyboard import ReplyKeyboardBuilder, InlineKeyboardBuilder
 
 def main_menu() -> ReplyKeyboardMarkup:
     b = ReplyKeyboardBuilder()
-    b.row(KeyboardButton(text="➕ افزودن اکانت"),   KeyboardButton(text="📊 وضعیت زنده"))
+    b.row(KeyboardButton(text="➕ افزودن اکانت"),  KeyboardButton(text="📊 وضعیت زنده"))
     b.row(KeyboardButton(text="👥 مدیریت اکانت‌ها"), KeyboardButton(text="📈 آمار پیشرفته"))
     b.row(KeyboardButton(text="🎬 روشن/خاموش ویو"),  KeyboardButton(text="🔄 چرخش دستی"))
-    b.row(KeyboardButton(text="⚙️ تنظیمات"),          KeyboardButton(text="🎯 گروه هدف"))
+    b.row(KeyboardButton(text="⚙️ تنظیمات"),          KeyboardButton(text="📢 کانال هدف"))
     b.row(KeyboardButton(text="❓ راهنما"))
     return b.as_markup(resize_keyboard=True)
 
@@ -43,12 +43,12 @@ def status_menu() -> InlineKeyboardMarkup:
 
 def accounts_menu() -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
-    b.button(text="📋 لیست کامل",    callback_data="acc:list:0")
-    b.button(text="➕ افزودن جدید",  callback_data="acc:add")
-    b.button(text="🔄 چرخش فوری",   callback_data="acc:rotate")
-    b.button(text="🧹 حذف flood‌ها", callback_data="acc:cleanup")
-    b.button(text="📥 بکاپ الان",    callback_data="acc:backup")
-    b.button(text="🔙 برگشت",        callback_data="menu:main")
+    b.button(text="📋 لیست کامل",   callback_data="acc:list:0")
+    b.button(text="➕ افزودن جدید", callback_data="acc:add")
+    b.button(text="🔄 چرخش فوری",  callback_data="acc:rotate")
+    b.button(text="🧹 حذف flood‌ها",callback_data="acc:cleanup")
+    b.button(text="📥 بکاپ الان",   callback_data="acc:backup")
+    b.button(text="🔙 برگشت",       callback_data="menu:main")
     b.adjust(2)
     return b.as_markup()
 
@@ -69,15 +69,15 @@ def accounts_list_kb(accounts: list, page: int = 0, per_page: int = 10) -> Inlin
 
     nav = []
     if page > 0:
-        nav.append(InlineKeyboardButton(text="⬅️ قبلی",        callback_data=f"acc:list:{page-1}"))
+        nav.append(InlineKeyboardButton(text="⬅️ قبلی",     callback_data=f"acc:list:{page-1}"))
     nav.append(    InlineKeyboardButton(text=f"📄 {page+1}/{tot}", callback_data="acc:noop"))
     if e < len(accounts):
-        nav.append(InlineKeyboardButton(text="بعدی ➡️",         callback_data=f"acc:list:{page+1}"))
+        nav.append(InlineKeyboardButton(text="بعدی ➡️",     callback_data=f"acc:list:{page+1}"))
 
     b.row(*nav)
     b.row(
-        InlineKeyboardButton(text="🔄 رفرش",  callback_data=f"acc:list:{page}"),
-        InlineKeyboardButton(text="🔙 برگشت", callback_data="menu:accounts"),
+        InlineKeyboardButton(text="🔄 رفرش",   callback_data=f"acc:list:{page}"),
+        InlineKeyboardButton(text="🔙 برگشت",  callback_data="menu:accounts"),
     )
     return b.as_markup()
 
@@ -86,6 +86,7 @@ def stats_menu() -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
     b.button(text="📊 آمار کلی",       callback_data="stats:general")
     b.button(text="📈 آمار ۲۴ ساعت",   callback_data="stats:daily")
+    b.button(text="🌐 وضعیت WARP",     callback_data="stats:warp")
     b.button(text="🔄 چرخه شیفت",      callback_data="stats:shift")
     b.button(text="📉 نمودار موفقیت",  callback_data="stats:chart")
     b.button(text="🔙 برگشت",          callback_data="menu:main")
@@ -95,52 +96,23 @@ def stats_menu() -> InlineKeyboardMarkup:
 
 def settings_menu() -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
-    b.button(text="⏱️ بازه تایم شیفت",   callback_data="set:shift_timing")
-    b.button(text="🔢 انتخاب شیفت فعال", callback_data="set:shift_active")
-    b.button(text="🛡️ وضعیت نگهبان",     callback_data="set:guardian")
-    b.button(text="💾 بکاپ",              callback_data="set:backup")
-    b.button(text="🔙 برگشت",             callback_data="menu:main")
+    b.button(text="⏱️ طول شیفت",     callback_data="set:shift")
+    b.button(text="👥 تعداد فعال",   callback_data="set:active")
+    b.button(text="🛡️ وضعیت نگهبان",callback_data="set:guardian")
+    b.button(text="💾 بکاپ",         callback_data="set:backup")
+    b.button(text="📊 WARP",         callback_data="set:warp")
+    b.button(text="🔙 برگشت",        callback_data="menu:main")
     b.adjust(2)
     return b.as_markup()
 
 
-def group_menu() -> InlineKeyboardMarkup:
+def channel_menu() -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
-    b.button(text="✏️ تنظیم آیدی گروه",       callback_data="grp:set")
-    b.button(text="👥 عضویت همه اکانت‌ها",    callback_data="grp:join")
-    b.button(text="📊 چک عضویت‌ها",            callback_data="grp:check")
-    b.button(text="🆔 نمایش گروه فعلی",        callback_data="grp:info")
-    b.button(text="🔙 برگشت",                  callback_data="menu:main")
+    b.button(text="👥 عضویت همه اکانت‌ها", callback_data="ch:join")
+    b.button(text="📊 چک عضویت‌ها",         callback_data="ch:check")
+    b.button(text="📢 نمایش کانال فعلی",    callback_data="ch:info")
+    b.button(text="🔙 برگشت",               callback_data="menu:main")
     b.adjust(1)
-    return b.as_markup()
-
-
-def shift_timing_menu() -> InlineKeyboardMarkup:
-    """منوی پیش‌فرض‌های بازه شیفت"""
-    b = InlineKeyboardBuilder()
-    presets = [
-        ("⚡ ۵-۱۰ دقیقه",   "5",  "10"),
-        ("🔵 ۱۵-۳۰ دقیقه",  "15", "30"),
-        ("🟢 ۲۵-۴۵ دقیقه",  "25", "45"),
-        ("🟡 ۳۰-۶۰ دقیقه",  "30", "60"),
-        ("🔴 ۴۵-۹۰ دقیقه",  "45", "90"),
-    ]
-    for label, mn, mx in presets:
-        b.button(text=label, callback_data=f"stm:preset:{mn}:{mx}")
-    b.button(text="✏️ وارد کردن دستی", callback_data="stm:custom")
-    b.button(text="🔙 برگشت",          callback_data="menu:main")
-    b.adjust(1)
-    return b.as_markup()
-
-
-def shift_select_menu(current: int) -> InlineKeyboardMarkup:
-    """منوی انتخاب شیفت فعال (۱ تا ۴)"""
-    b = InlineKeyboardBuilder()
-    for i in range(1, 5):
-        mark = "✅ " if i == current else ""
-        b.button(text=f"{mark}شیفت {i}", callback_data=f"shift:select:{i}")
-    b.button(text="🔙 برگشت", callback_data="menu:main")
-    b.adjust(2)
     return b.as_markup()
 
 
