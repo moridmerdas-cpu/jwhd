@@ -62,7 +62,8 @@ def accounts_list_kb(accounts: list, page: int = 0, per_page: int = 10) -> Inlin
     for a in accounts[s:e]:
         icon = {"online": "🟢", "flood": "🟡", "error": "🔴",
                 "idle": "💤", "dead": "⚫"}.get(a.get("status", "idle"), "⚪")
-        shift_icon = "🅰️" if a.get("shift") == "A" else "🅱️"
+        shift_map  = {"1": "1️⃣", "2": "2️⃣", "3": "3️⃣", "4": "4️⃣"}
+        shift_icon = shift_map.get(str(a.get("shift", "1")), "🔢")
         b.button(text=f"{icon} {shift_icon} {a['phone']}",
                  callback_data=f"acc:info:{a['id']}")
     b.adjust(1)
