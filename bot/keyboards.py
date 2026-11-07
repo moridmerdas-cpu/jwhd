@@ -12,6 +12,7 @@ def main_menu() -> ReplyKeyboardMarkup:
     b.row(KeyboardButton(text="👥 مدیریت اکانت‌ها"), KeyboardButton(text="📈 آمار پیشرفته"))
     b.row(KeyboardButton(text="🎬 روشن/خاموش ویو"),  KeyboardButton(text="🔄 چرخش دستی"))
     b.row(KeyboardButton(text="⚙️ تنظیمات"),          KeyboardButton(text="📢 کانال هدف"))
+    b.row(KeyboardButton(text="⏰ زمان‌بندی شیفت‌ها"))
     b.row(KeyboardButton(text="❓ راهنما"))
     return b.as_markup(resize_keyboard=True)
 
@@ -127,4 +128,33 @@ def confirm_menu(action: str) -> InlineKeyboardMarkup:
 def cancel_menu() -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
     b.button(text="❌ انصراف", callback_data="add:cancel")
+    return b.as_markup()
+
+
+def shift_schedule_menu(schedules: list) -> InlineKeyboardMarkup:
+    """منوی تنظیم زمان‌بندی شیفت‌ها"""
+    b = InlineKeyboardBuilder()
+    for s in schedules:
+        num     = s["shift_num"]
+        sh, eh  = s["start_hour"], s["end_hour"]
+        enabled = "✅" if s["enabled"] else "❌"
+        b.button(
+            text=f"{enabled} شیفت {num}  |  {sh:02d}:00 → {eh:02d}:00",
+            callback_data=f"sch:edit:{num}",
+        )
+    b.button(text="🔄 اعمال الان",  callback_data="sch:apply")
+    b.button(text="🔙 برگشت",       callback_data="menu:main")
+    b.adjust(1)
+    return b.as_markup()
+
+
+def shift_toggle_menu(shift_num: int, enabled: bool) -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    b.button(
+        text="❌ غیرفعال کردن" if enabled else "✅ فعال کردن",
+        callback_data=f"sch:toggle:{shift_num}",
+    )
+    b.button(text="⏱️ تغییر بازه زمانی", callback_data=f"sch:settime:{shift_num}")
+    b.button(text="🔙 برگشت",             callback_data="sch:list")
+    b.adjust(1)
     return b.as_markup()

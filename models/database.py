@@ -54,6 +54,17 @@ def init_db():
             module TEXT, step TEXT, status TEXT, message TEXT,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE TABLE IF NOT EXISTS shift_schedules (
+            shift_num  INTEGER PRIMARY KEY,
+            start_hour INTEGER NOT NULL DEFAULT 0,
+            end_hour   INTEGER NOT NULL DEFAULT 6,
+            enabled    INTEGER NOT NULL DEFAULT 1
+        );
+        INSERT OR IGNORE INTO shift_schedules (shift_num, start_hour, end_hour) VALUES
+            (1, 0,  6),
+            (2, 6,  12),
+            (3, 12, 18),
+            (4, 18, 24);
         """)
     finally:
         c.close()
@@ -162,3 +173,48 @@ def debug_log(module, step, status, message=""):
         finally: c.close()
     except Exception as e:
         print(f"[LOG-FAIL] {e}", flush=True)
+
+
+def get_shift_schedules() -> list:
+    """لیست همه schedule‌ها — [{shift_num, start_hour, end_hour, enabled}]"""
+    c = get_conn()
+    try:
+        rows = c.execute(
+            "SELECT shift_num, start_hour, end_hour, enabled "
+            "FROM shift_schedules ORDER BY shift_num"
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        c.close()
+
+
+def set_shift_schedule(shift_num: int, start_hour: int, end_hour: int, enabled: int = 1):
+    """ذخیره بازه زمانی یک شیفت"""
+    c = get_conn()
+    try:
+        c.execute(
+            "INSERT INTO shift_schedules (shift_num, start_hour, end_hour, enabled) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(shift_num) DO UPDATE SET "
+            "start_hour=excluded.start_hour, end_hour=excluded.end_hour, enabled=excluded.enabled",
+            (shift_num, start_hour, end_hour, enabled),
+        )
+    finally:
+        c.close()
+
+
+def get_active_shift_for_hour(hour: int) -> int | None:
+    """شیفتی که الان باید فعال باشه بر اساس ساعت (UTC) — None یعنی هیچ‌کدام"""
+    schedules = get_shift_schedules()
+    for s in schedules:
+        if not s["enabled"]:
+            continue
+        sh, eh = s["start_hour"], s["end_hour"]
+        if sh < eh:
+            if sh <= hour < eh:
+                return s["shift_num"]
+        else:
+            # بازه‌ای که از شب رد می‌شه: مثلاً 22 تا 6
+            if hour >= sh or hour < eh:
+                return s["shift_num"]
+    return None

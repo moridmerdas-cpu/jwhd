@@ -17,9 +17,9 @@ from models import database as db
 from bot.keyboards import (
     main_menu, status_menu, accounts_menu, accounts_list_kb,
     stats_menu, settings_menu, channel_menu, confirm_menu,
-    cancel_menu, view_toggle_menu,
+    cancel_menu, view_toggle_menu, shift_schedule_menu, shift_toggle_menu,
 )
-from bot.states import AddAccount
+from bot.states import AddAccount, ShiftSchedule
 
 router = Router()
 
@@ -699,6 +699,173 @@ async def add_cancel(cb: types.CallbackQuery, state: FSMContext):
     await state.clear()
     await cb.message.edit_text("❌ لغو شد.", reply_markup=accounts_menu())
     await cb.answer("لغو")
+
+
+# ─────────────────────────────────────────────────────────
+# زمان‌بندی شیفت‌ها
+# ─────────────────────────────────────────────────────────
+def _schedules_text(schedules: list) -> str:
+    hour = __import__("datetime").datetime.utcnow().hour
+    active = db.get_active_shift_for_hour(hour)
+    lines  = [
+        "⏰ <b>زمان‌بندی شیفت‌ها</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🕐 ساعت UTC الان: <b>{hour:02d}:00</b>\n"
+        f"✅ شیفت فعال الان: <b>{active if active else '—'}</b>\n\n"
+        "📋 برنامه:\n"
+    ]
+    for s in schedules:
+        num    = s["shift_num"]
+        sh, eh = s["start_hour"], s["end_hour"]
+        st     = "✅" if s["enabled"] else "❌"
+        cur    = " ◄ الان" if num == active else ""
+        lines.append(f"  {st} شیفت {num}: <code>{sh:02d}:00</code> تا <code>{eh:02d}:00</code>{cur}\n")
+    lines.append("\n💡 روی هر شیفت بزن تا ویرایش کنی")
+    return "".join(lines)
+
+
+@router.message(F.text == "⏰ زمان‌بندی شیفت‌ها")
+async def show_schedule(msg: types.Message):
+    if not await guard(msg): return
+    schedules = db.get_shift_schedules()
+    await msg.answer(
+        _schedules_text(schedules),
+        reply_markup=shift_schedule_menu(schedules),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data == "sch:list")
+async def cb_sch_list(cb: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    schedules = db.get_shift_schedules()
+    await cb.message.edit_text(
+        _schedules_text(schedules),
+        reply_markup=shift_schedule_menu(schedules),
+        parse_mode="HTML",
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("sch:edit:"))
+async def cb_sch_edit(cb: types.CallbackQuery):
+    shift_num = int(cb.data.split(":")[2])
+    schedules = db.get_shift_schedules()
+    s = next((x for x in schedules if x["shift_num"] == shift_num), None)
+    if not s:
+        await cb.answer("شیفت پیدا نشد", show_alert=True)
+        return
+    enabled = bool(s["enabled"])
+    await cb.message.edit_text(
+        f"⚙️ <b>شیفت {shift_num}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"وضعیت: {'✅ فعال' if enabled else '❌ غیرفعال'}\n"
+        f"بازه: <code>{s['start_hour']:02d}:00</code> تا <code>{s['end_hour']:02d}:00</code>\n\n"
+        f"👇 چی می‌خوای تغییر بدی؟",
+        reply_markup=shift_toggle_menu(shift_num, enabled),
+        parse_mode="HTML",
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("sch:toggle:"))
+async def cb_sch_toggle(cb: types.CallbackQuery):
+    shift_num = int(cb.data.split(":")[2])
+    schedules = db.get_shift_schedules()
+    s = next((x for x in schedules if x["shift_num"] == shift_num), None)
+    if not s:
+        await cb.answer("شیفت پیدا نشد", show_alert=True)
+        return
+    new_enabled = 0 if s["enabled"] else 1
+    db.set_shift_schedule(shift_num, s["start_hour"], s["end_hour"], new_enabled)
+    state_txt = "فعال ✅" if new_enabled else "غیرفعال ❌"
+    await cb.answer(f"شیفت {shift_num} {state_txt}", show_alert=True)
+    # بروزرسانی پنل
+    schedules = db.get_shift_schedules()
+    await cb.message.edit_text(
+        _schedules_text(schedules),
+        reply_markup=shift_schedule_menu(schedules),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data.startswith("sch:settime:"))
+async def cb_sch_settime(cb: types.CallbackQuery, state: FSMContext):
+    shift_num = int(cb.data.split(":")[2])
+    await state.set_state(ShiftSchedule.waiting_range)
+    await state.update_data(shift_num=shift_num)
+    await cb.message.edit_text(
+        f"⏱️ <b>تنظیم بازه شیفت {shift_num}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"بازه رو به فرمت زیر بفرست:\n"
+        f"<code>شروع-پایان</code>\n\n"
+        f"مثال‌ها:\n"
+        f"• <code>8-14</code> → از ۸ صبح تا ۲ بعدازظهر\n"
+        f"• <code>14-20</code> → از ۲ تا ۸ شب\n"
+        f"• <code>22-6</code> → از ۱۰ شب تا ۶ صبح\n\n"
+        f"⚠️ ساعت‌ها به وقت UTC هستن",
+        parse_mode="HTML",
+    )
+    await cb.answer()
+
+
+@router.message(StateFilter(ShiftSchedule.waiting_range))
+async def sch_receive_range(msg: types.Message, state: FSMContext):
+    if not await guard(msg): return
+    text = msg.text.strip()
+    try:
+        parts = text.split("-")
+        if len(parts) != 2:
+            raise ValueError
+        sh = int(parts[0].strip())
+        eh = int(parts[1].strip())
+        if not (0 <= sh <= 23 and 0 <= eh <= 24):
+            raise ValueError
+    except (ValueError, IndexError):
+        await msg.answer(
+            "❌ فرمت اشتباه\n\n"
+            "مثال درست: <code>8-14</code> یا <code>22-6</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    data      = await state.get_data()
+    shift_num = data["shift_num"]
+    schedules = db.get_shift_schedules()
+    s         = next((x for x in schedules if x["shift_num"] == shift_num), None)
+    enabled   = s["enabled"] if s else 1
+    db.set_shift_schedule(shift_num, sh, eh, enabled)
+    await state.clear()
+
+    schedules = db.get_shift_schedules()
+    await msg.answer(
+        f"✅ <b>شیفت {shift_num} آپدیت شد</b>\n\n"
+        f"بازه جدید: <code>{sh:02d}:00</code> تا <code>{eh:02d}:00</code>\n\n"
+        + _schedules_text(schedules),
+        reply_markup=shift_schedule_menu(schedules),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data == "sch:apply")
+async def cb_sch_apply(cb: types.CallbackQuery):
+    """اعمال فوری — scheduler رو force می‌کنه شیفت الان رو چک کنه"""
+    from core.pool import POOL
+    hour   = __import__("datetime").datetime.utcnow().hour
+    target = db.get_active_shift_for_hour(hour)
+    if target is None:
+        await cb.answer("⚠️ هیچ شیفت فعالی برای این ساعت نیست", show_alert=True)
+        return
+    old              = POOL.active_shift
+    POOL.active_shift = target
+    db.debug_log("scheduler", "force_apply", "OK", f"{old} → {target}")
+    await cb.answer(f"✅ شیفت {target} فعال شد (قبلاً: {old})", show_alert=True)
+    schedules = db.get_shift_schedules()
+    await cb.message.edit_text(
+        _schedules_text(schedules),
+        reply_markup=shift_schedule_menu(schedules),
+        parse_mode="HTML",
+    )
 
 
 # ─────────────────────────────────────────────────────────

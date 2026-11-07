@@ -10,3 +10,7 @@ class AddAccount(StatesGroup):
 class SetChannel(StatesGroup):
     waiting_channel  = State()
     waiting_messages = State()
+
+
+class ShiftSchedule(StatesGroup):
+    waiting_range = State()   # منتظر ورودی "HH-HH" برای یک شیفت مشخص
