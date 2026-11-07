@@ -1,4 +1,4 @@
-"""Scheduler — swap شیفت‌ها با بازه تصادفی قابل تنظیم از ربات"""
+"""Scheduler — swap بین 4 شیفت هر 50-70s"""
 import asyncio, random, sys
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -18,35 +18,17 @@ def get_scheduler_instance():
     return _INSTANCE
 
 
-def _get_shift_range():
-    """بازه تایم شیفت رو از DB می‌خونه (ثانیه)"""
-    try:
-        mn = int(db.get_setting("shift_min_sec", Config.SHIFT_MIN_SEC))
-        mx = int(db.get_setting("shift_max_sec", Config.SHIFT_MAX_SEC))
-        if mn < 30:   mn = 30
-        if mx < mn+30: mx = mn + 30
-        return mn, mx
-    except Exception:
-        return Config.SHIFT_MIN_SEC, Config.SHIFT_MAX_SEC
-
-
 class AccountScheduler:
     def __init__(self):
         self._running = False
         self._task = None
 
-    @property
-    def _current_shift(self):
+    async def get_active_shift(self):
         from core.pool import POOL
         return POOL.active_shift
 
-    @property
-    def _next_swap_at(self):
-        return _STATE["next_swap_at"]
-
     def _schedule_next(self):
-        mn, mx = _get_shift_range()
-        seconds = random.randint(mn, mx)
+        seconds = random.randint(50, 70)
         _STATE["last_interval"] = seconds
         _STATE["next_swap_at"] = datetime.utcnow() + timedelta(seconds=seconds)
         return seconds

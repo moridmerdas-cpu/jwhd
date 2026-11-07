@@ -42,65 +42,35 @@ def init_db():
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE TABLE IF NOT EXISTS channels (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            channel_username TEXT UNIQUE NOT NULL,
+            group_id TEXT,
+            active INTEGER DEFAULT 1,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
         CREATE TABLE IF NOT EXISTS debug_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             module TEXT, step TEXT, status TEXT, message TEXT,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
-        CREATE TABLE IF NOT EXISTS settings (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL
-        );
         """)
-        # مقادیر پیش‌فرض تنظیمات
-        c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('target_group_id', ?)",
-                  (str(Config.TARGET_GROUP_ID),))
-        c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('shift_min_sec', ?)",
-                  (str(Config.SHIFT_MIN_SEC),))
-        c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('shift_max_sec', ?)",
-                  (str(Config.SHIFT_MAX_SEC),))
-        c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('active_shift', '1')")
-        c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('auto_view_enabled', '1')")
     finally:
         c.close()
     print("✅ دیتابیس آماده شد")
 
 
-# ── Settings helpers ──────────────────────────────────────
-def get_setting(key: str, default=None):
-    c = get_conn()
-    try:
-        r = c.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
-        return r["value"] if r else default
-    finally:
-        c.close()
-
-
-def set_setting(key: str, value):
-    c = get_conn()
-    try:
-        c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
-                  (key, str(value)))
-    finally:
-        c.close()
-
-
-def get_all_settings() -> dict:
-    c = get_conn()
-    try:
-        return {r["key"]: r["value"] for r in c.execute("SELECT key, value FROM settings").fetchall()}
-    finally:
-        c.close()
-
-
-# ── Account helpers ───────────────────────────────────────
 def add_account(phone, ss, pp=None):
+    """اضافه کردن اکانت + تعیین خودکار شیفت (A یا B) بر اساس تعداد موجود"""
     c = get_conn()
     try:
+        # تعداد فعلی
         row = c.execute("SELECT COUNT(*) as cnt FROM accounts").fetchone()
         count = row["cnt"]
+        # 0-74 → A, 75-149 → B, 150-224 → A, ...
         half = 75
         shift = "A" if (count // half) % 2 == 0 else "B"
+        
         cur = c.execute(
             "INSERT INTO accounts (phone, session_encrypted, proxy_port, shift) VALUES (?, ?, ?, ?)",
             (phone, encrypt(ss), pp, shift))
@@ -164,6 +134,21 @@ def count_by_status():
     c = get_conn()
     try:
         return {r["status"]: r["cnt"] for r in c.execute("SELECT status, COUNT(*) as cnt FROM accounts GROUP BY status").fetchall()}
+    finally: c.close()
+
+
+def add_channel(username, gid=None):
+    c = get_conn()
+    try:
+        cur = c.execute("INSERT OR IGNORE INTO channels (channel_username, group_id) VALUES (?, ?)", (username, gid))
+        return cur.lastrowid
+    finally: c.close()
+
+
+def get_active_channels():
+    c = get_conn()
+    try:
+        return [dict(r) for r in c.execute("SELECT * FROM channels WHERE active=1").fetchall()]
     finally: c.close()
 
 

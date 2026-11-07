@@ -7,9 +7,6 @@ class AddAccount(StatesGroup):
     waiting_password = State()
 
 
-class SetShiftTiming(StatesGroup):
-    waiting_range = State()
-
-
-class SetGroup(StatesGroup):
-    waiting_id = State()
+class SetChannel(StatesGroup):
+    waiting_channel  = State()
+    waiting_messages = State()
