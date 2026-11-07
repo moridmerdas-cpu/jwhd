@@ -7,14 +7,8 @@ load_dotenv(BASE_DIR / ".env")
 
 
 def _get_int(key, default=0):
-    val = os.getenv(key)
-    if val is None:
-        return default
-    val = val.strip()
-    try:
-        return int(val)
-    except (ValueError, TypeError):
-        return default
+    try: return int(os.getenv(key, default))
+    except (ValueError, TypeError): return default
 
 
 def _get_admins(key):
@@ -39,16 +33,21 @@ class Config:
     LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
     SHIFT_SIZE = 75
     SHIFT_MINUTES = 30
-    TARGET_CHANNEL_ID = _get_int("TARGET_CHANNEL_ID", 0)
-    TARGET_CHANNEL_USERNAME = os.getenv("TARGET_CHANNEL_USERNAME", "")
+
+    # ── تارگت: فقط گروه ──
     TARGET_GROUP_ID = _get_int("TARGET_GROUP_ID", 0)
+
     AUTO_VIEW_ENABLED  = _get_int("AUTO_VIEW_ENABLED", 1) == 1
     AUTO_VIEW_DELAY_MS = _get_int("AUTO_VIEW_DELAY_MS", 0)
 
+    # ── بازه تایم شیفت (ثانیه) — از DB قابل تغییرن ──
+    SHIFT_MIN_SEC: int = _get_int("SHIFT_MIN_SEC", 1500)   # 25 دقیقه
+    SHIFT_MAX_SEC: int = _get_int("SHIFT_MAX_SEC", 2700)   # 45 دقیقه
+
     # Webhook
-    WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL", "")          # https://yourdomain.com
-    WEBHOOK_PATH     = os.getenv("WEBHOOK_PATH", "/webhook")       # /webhook
-    WEBHOOK_SECRET   = os.getenv("WEBHOOK_SECRET", "")             # توکن امنیتی تصادفی
+    WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL", "")
+    WEBHOOK_PATH     = os.getenv("WEBHOOK_PATH", "/webhook")
+    WEBHOOK_SECRET   = os.getenv("WEBHOOK_SECRET", "")
     WEBHOOK_HOST     = os.getenv("WEBHOOK_HOST", "0.0.0.0")
     WEBHOOK_PORT     = _get_int("WEBHOOK_PORT", 8443)
 
@@ -60,9 +59,6 @@ class Config:
         if not cls.BOT_TOKEN or ":" not in cls.BOT_TOKEN: e.append("BOT_TOKEN")
         if not cls.ADMIN_IDS: e.append("ADMIN_IDS")
         if len(cls.ENCRYPTION_KEY) != 32: e.append("ENCRYPTION_KEY")
-        if not cls.TARGET_GROUP_ID:
-            raw = os.getenv("TARGET_GROUP_ID", "NOT_SET")
-            e.append(f"TARGET_GROUP_ID (مقدار فعلی: '{raw}' — باید عدد منفی مثل -1001234567890 باشه)")
         return e
 
 

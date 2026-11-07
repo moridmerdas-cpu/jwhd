@@ -42,46 +42,65 @@ def init_db():
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
-        CREATE TABLE IF NOT EXISTS channels (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            channel_username TEXT UNIQUE NOT NULL,
-            group_id TEXT,
-            active INTEGER DEFAULT 1,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
-        );
         CREATE TABLE IF NOT EXISTS debug_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             module TEXT, step TEXT, status TEXT, message TEXT,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
-        CREATE TABLE IF NOT EXISTS shift_schedules (
-            shift_num  INTEGER PRIMARY KEY,
-            start_hour INTEGER NOT NULL DEFAULT 0,
-            end_hour   INTEGER NOT NULL DEFAULT 6,
-            enabled    INTEGER NOT NULL DEFAULT 1
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
         );
-        INSERT OR IGNORE INTO shift_schedules (shift_num, start_hour, end_hour) VALUES
-            (1, 0,  6),
-            (2, 6,  12),
-            (3, 12, 18),
-            (4, 18, 24);
         """)
+        # مقادیر پیش‌فرض تنظیمات
+        c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('target_group_id', ?)",
+                  (str(Config.TARGET_GROUP_ID),))
+        c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('shift_min_sec', ?)",
+                  (str(Config.SHIFT_MIN_SEC),))
+        c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('shift_max_sec', ?)",
+                  (str(Config.SHIFT_MAX_SEC),))
+        c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('active_shift', '1')")
+        c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('auto_view_enabled', '1')")
     finally:
         c.close()
     print("✅ دیتابیس آماده شد")
 
 
-def add_account(phone, ss, pp=None):
-    """اضافه کردن اکانت + تعیین خودکار شیفت (A یا B) بر اساس تعداد موجود"""
+# ── Settings helpers ──────────────────────────────────────
+def get_setting(key: str, default=None):
     c = get_conn()
     try:
-        # تعداد فعلی
+        r = c.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+        return r["value"] if r else default
+    finally:
+        c.close()
+
+
+def set_setting(key: str, value):
+    c = get_conn()
+    try:
+        c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+                  (key, str(value)))
+    finally:
+        c.close()
+
+
+def get_all_settings() -> dict:
+    c = get_conn()
+    try:
+        return {r["key"]: r["value"] for r in c.execute("SELECT key, value FROM settings").fetchall()}
+    finally:
+        c.close()
+
+
+# ── Account helpers ───────────────────────────────────────
+def add_account(phone, ss, pp=None):
+    c = get_conn()
+    try:
         row = c.execute("SELECT COUNT(*) as cnt FROM accounts").fetchone()
         count = row["cnt"]
-        # 0-74 → A, 75-149 → B, 150-224 → A, ...
         half = 75
         shift = "A" if (count // half) % 2 == 0 else "B"
-        
         cur = c.execute(
             "INSERT INTO accounts (phone, session_encrypted, proxy_port, shift) VALUES (?, ?, ?, ?)",
             (phone, encrypt(ss), pp, shift))
@@ -148,21 +167,6 @@ def count_by_status():
     finally: c.close()
 
 
-def add_channel(username, gid=None):
-    c = get_conn()
-    try:
-        cur = c.execute("INSERT OR IGNORE INTO channels (channel_username, group_id) VALUES (?, ?)", (username, gid))
-        return cur.lastrowid
-    finally: c.close()
-
-
-def get_active_channels():
-    c = get_conn()
-    try:
-        return [dict(r) for r in c.execute("SELECT * FROM channels WHERE active=1").fetchall()]
-    finally: c.close()
-
-
 def debug_log(module, step, status, message=""):
     print(f"[{status}] {module}.{step}: {message}", flush=True)
     try:
@@ -173,48 +177,3 @@ def debug_log(module, step, status, message=""):
         finally: c.close()
     except Exception as e:
         print(f"[LOG-FAIL] {e}", flush=True)
-
-
-def get_shift_schedules() -> list:
-    """لیست همه schedule‌ها — [{shift_num, start_hour, end_hour, enabled}]"""
-    c = get_conn()
-    try:
-        rows = c.execute(
-            "SELECT shift_num, start_hour, end_hour, enabled "
-            "FROM shift_schedules ORDER BY shift_num"
-        ).fetchall()
-        return [dict(r) for r in rows]
-    finally:
-        c.close()
-
-
-def set_shift_schedule(shift_num: int, start_hour: int, end_hour: int, enabled: int = 1):
-    """ذخیره بازه زمانی یک شیفت"""
-    c = get_conn()
-    try:
-        c.execute(
-            "INSERT INTO shift_schedules (shift_num, start_hour, end_hour, enabled) "
-            "VALUES (?, ?, ?, ?) "
-            "ON CONFLICT(shift_num) DO UPDATE SET "
-            "start_hour=excluded.start_hour, end_hour=excluded.end_hour, enabled=excluded.enabled",
-            (shift_num, start_hour, end_hour, enabled),
-        )
-    finally:
-        c.close()
-
-
-def get_active_shift_for_hour(hour: int) -> int | None:
-    """شیفتی که الان باید فعال باشه بر اساس ساعت (UTC) — None یعنی هیچ‌کدام"""
-    schedules = get_shift_schedules()
-    for s in schedules:
-        if not s["enabled"]:
-            continue
-        sh, eh = s["start_hour"], s["end_hour"]
-        if sh < eh:
-            if sh <= hour < eh:
-                return s["shift_num"]
-        else:
-            # بازه‌ای که از شب رد می‌شه: مثلاً 22 تا 6
-            if hour >= sh or hour < eh:
-                return s["shift_num"]
-    return None
