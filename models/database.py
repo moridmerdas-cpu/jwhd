@@ -99,8 +99,8 @@ def add_account(phone, ss, pp=None):
     try:
         row = c.execute("SELECT COUNT(*) as cnt FROM accounts").fetchone()
         count = row["cnt"]
-        half = 75
-        shift = "A" if (count // half) % 2 == 0 else "B"
+        # شیفت‌های عددی 1-4 هماهنگ با pool.py
+        shift = str((count % 4) + 1)
         cur = c.execute(
             "INSERT INTO accounts (phone, session_encrypted, proxy_port, shift) VALUES (?, ?, ?, ?)",
             (phone, encrypt(ss), pp, shift))
@@ -165,6 +165,22 @@ def count_by_status():
     try:
         return {r["status"]: r["cnt"] for r in c.execute("SELECT status, COUNT(*) as cnt FROM accounts GROUP BY status").fetchall()}
     finally: c.close()
+
+
+def migrate_shifts():
+    """تبدیل شیفت‌های قدیمی A/B/C/D به عددی 1/2/3/4"""
+    legacy_map = {"A": "1", "B": "2", "C": "3", "D": "4"}
+    c = get_conn()
+    try:
+        rows = c.execute("SELECT phone, shift FROM accounts WHERE shift IN ('A','B','C','D')").fetchall()
+        if not rows:
+            return
+        for r in rows:
+            new_shift = legacy_map.get(r["shift"], "1")
+            c.execute("UPDATE accounts SET shift=? WHERE phone=?", (new_shift, r["phone"]))
+        print(f"✅ مایگریشن شیفت: {len(rows)} اکانت تبدیل شدن (A/B/C/D → 1/2/3/4)", flush=True)
+    finally:
+        c.close()
 
 
 def debug_log(module, step, status, message=""):

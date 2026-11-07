@@ -797,6 +797,21 @@ async def add_code(msg: types.Message, state: FSMContext):
         await c.disconnect()
         _pending.pop(msg.from_user.id, None)
         acc_id = db.add_account(phone, ss)
+
+        # اکانت جدید رو بلافاصله به pool وصل کن
+        try:
+            from core.pool import POOL
+            POOL.clients[phone] = c
+            POOL.all_phones.append(phone)
+            # شیفت عددی از DB بخون و به bucket درست اضافه کن
+            acc_row = db.get_account(phone)
+            shift_num = int(acc_row.get("shift", "1"))
+            if shift_num not in POOL.shifts:
+                POOL.shifts[shift_num] = []
+            POOL.shifts[shift_num].append(phone)
+        except Exception as _pe:
+            db.debug_log("handlers", "pool_add", "WARN", str(_pe))
+
         await msg.answer(
             f"✅ <b>اکانت اضافه شد!</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n\n"

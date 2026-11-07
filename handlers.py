@@ -400,7 +400,6 @@ async def cb_settings(cb: types.CallbackQuery, state: FSMContext):
         pass
 
 
-# تنظیم بازه شیفت — پیش‌فرض
 @router.callback_query(F.data.startswith("stm:preset:"))
 async def cb_shift_timing_preset(cb: types.CallbackQuery):
     _, _, mn_str, mx_str = cb.data.split(":")
@@ -420,7 +419,6 @@ async def cb_shift_timing_preset(cb: types.CallbackQuery):
         pass
 
 
-# تنظیم بازه شیفت — دستی
 @router.callback_query(F.data == "stm:custom")
 async def cb_shift_timing_custom(cb: types.CallbackQuery, state: FSMContext):
     await cb.message.edit_text(
@@ -461,7 +459,6 @@ async def set_shift_timing(msg: types.Message, state: FSMContext):
     await state.clear()
 
 
-# انتخاب شیفت فعال
 @router.callback_query(F.data.startswith("shift:select:"))
 async def cb_shift_select(cb: types.CallbackQuery):
     shift = int(cb.data.split(":")[2])
@@ -568,12 +565,12 @@ async def cb_accounts(cb: types.CallbackQuery, state: FSMContext):
         await cb.message.edit_text(_status_text(), reply_markup=status_menu(), parse_mode="HTML")
 
     elif action == "cleanup":
-        conn = db.get_conn()
-        try:
-            r = conn.execute("UPDATE accounts SET status='idle', flood_until=NULL WHERE status='flood'")
-            n = r.rowcount
-        finally:
-            conn.close()
+        # ✅ FIX: جایگزین raw SQL با Supabase
+        sb = db._get_client()
+        res = sb.table("accounts").update(
+            {"status": "idle", "flood_until": None}
+        ).eq("status", "flood").execute()
+        n = len(res.data) if res.data else 0
         await cb.answer(f"✅ {n} اکانت آزاد شد", show_alert=True)
 
     elif action == "backup":
@@ -585,14 +582,13 @@ async def cb_accounts(cb: types.CallbackQuery, state: FSMContext):
             await cb.answer(f"❌ خطا: {e}", show_alert=True)
 
     elif action == "info":
+        # ✅ FIX: جایگزین raw SQL با db helper
         acc_id = int(d[2])
-        conn   = db.get_conn()
-        try:
-            row = conn.execute("SELECT * FROM accounts WHERE id=?", (acc_id,)).fetchone()
-        finally:
-            conn.close()
-        if row:
-            a    = dict(row)
+        # get by id
+        sb  = db._get_client()
+        res = sb.table("accounts").select("*").eq("id", acc_id).maybe_single().execute()
+        a   = res.data
+        if a:
             icon = {"online": "🟢", "flood": "🟡", "error": "🔴", "idle": "💤"}.get(a["status"], "⚪")
             text = (
                 f"<b>📱 اکانت #{acc_id}</b>\n"
@@ -638,14 +634,12 @@ async def cb_stats(cb: types.CallbackQuery):
         )
 
     elif data == "daily":
-        conn = db.get_conn()
-        try:
-            msgs = conn.execute(
-                "SELECT COUNT(*) FROM debug_log WHERE step='new_msg' "
-                "AND created_at >= datetime('now', '-24 hours')"
-            ).fetchone()[0]
-        finally:
-            conn.close()
+        # ✅ FIX: جایگزین raw SQL با Supabase query
+        sb  = db._get_client()
+        from datetime import datetime, timedelta
+        since = (datetime.utcnow() - timedelta(hours=24)).isoformat()
+        res   = sb.table("debug_log").select("id", count="exact").eq("step", "new_msg").gte("created_at", since).execute()
+        msgs  = res.count or 0
         await cb.message.edit_text(
             f"📈 <b>آمار ۲۴ ساعت</b>\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
             f"📨 پیام‌های جدید: <b>{msgs}</b>\n",
@@ -655,9 +649,9 @@ async def cb_stats(cb: types.CallbackQuery):
     elif data == "shift":
         from core.scheduler import AccountScheduler, _STATE
         from core.pool import POOL
-        cur = POOL.active_shift
+        cur    = POOL.active_shift
         nxt_dt = _STATE.get("next_swap_at")
-        nxt = nxt_dt.strftime("%H:%M:%S") if nxt_dt else "?"
+        nxt    = nxt_dt.strftime("%H:%M:%S") if nxt_dt else "?"
         last_iv = _STATE.get("last_interval", 0)
         mn = int(db.get_setting("shift_min_sec", Config.SHIFT_MIN_SEC)) // 60
         mx = int(db.get_setting("shift_max_sec", Config.SHIFT_MAX_SEC)) // 60
@@ -671,20 +665,19 @@ async def cb_stats(cb: types.CallbackQuery):
         )
 
     elif data == "chart":
-        conn = db.get_conn()
-        try:
-            rows = conn.execute(
-                "SELECT substr(created_at, 1, 13) as h, COUNT(*) as ok "
-                "FROM debug_log WHERE step='read_done' AND status='RESULT' "
-                "AND created_at >= datetime('now', '-12 hours') "
-                "GROUP BY h ORDER BY h"
-            ).fetchall()
-        finally:
-            conn.close()
+        # ✅ FIX: جایگزین raw SQL با Supabase
+        sb  = db._get_client()
+        from datetime import datetime, timedelta
+        since = (datetime.utcnow() - timedelta(hours=12)).isoformat()
+        res   = sb.table("debug_log").select("created_at").eq("step", "read_done").eq("status", "RESULT").gte("created_at", since).execute()
+        # گروه‌بندی دستی بر اساس ساعت
+        hour_counts: dict = {}
+        for row in (res.data or []):
+            h = str(row["created_at"])[11:13]
+            hour_counts[h] = hour_counts.get(h, 0) + 1
         text = "📉 <b>نمودار ۱۲ ساعت</b>\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        for r in rows:
-            h   = str(r["h"])[11:13]
-            ok  = r["ok"] or 0
+        for h in sorted(hour_counts):
+            ok  = hour_counts[h]
             bar = "▰" * min(ok, 20) + "▱" * max(0, 20 - min(ok, 20))
             text += f"<code>{h}:00</code> {bar} <b>{ok}</b>\n"
         await cb.message.edit_text(text, reply_markup=stats_menu(), parse_mode="HTML")
@@ -718,6 +711,43 @@ async def _join_group(client):
         err = str(e).lower()
         if "already" not in err and "participant" not in err:
             db.debug_log("handlers", "join_group", "WARN", f"{type(e).__name__}")
+
+
+async def _add_to_pool_hot(phone: str, ss: str):
+    """
+    ✅ FIX: اکانت جدید رو بلافاصله به POOL اضافه می‌کنه
+    بدون نیاز به ری‌استارت ربات
+    """
+    try:
+        from core.pool import POOL
+        from core.engine import make_client
+
+        # اگه POOL هنوز init نشده، کاری نکن — init خودش اکانت‌ها رو لود می‌کنه
+        if not POOL._initialized:
+            return
+
+        # اکانت رو به all_phones اضافه کن اگه قبلاً نبوده
+        if phone not in POOL.all_phones:
+            POOL.all_phones.append(phone)
+
+        # به شیفت 1 اضافه کن (کم‌جمعیت‌ترین شیفت رو پیدا کن)
+        min_shift = min(POOL.shifts, key=lambda k: len(POOL.shifts[k]))
+        if phone not in POOL.shifts[min_shift]:
+            POOL.shifts[min_shift].append(phone)
+
+        # کانکت کن
+        client = make_client(ss, phone=phone)
+        await asyncio.wait_for(client.connect(), timeout=25)
+        ok = await asyncio.wait_for(client.is_user_authorized(), timeout=10)
+        if ok:
+            POOL.clients[phone] = client
+            db.update_account_status(phone, "online")
+            db.debug_log("handlers", "hot_add", "OK", f"{phone} → shift {min_shift}")
+        else:
+            await client.disconnect()
+            db.debug_log("handlers", "hot_add", "WARN", f"{phone} not authorized")
+    except Exception as e:
+        db.debug_log("handlers", "hot_add", "ERROR", f"{phone}: {type(e).__name__}: {e}")
 
 
 @router.message(F.text.startswith("➕"))
@@ -798,19 +828,8 @@ async def add_code(msg: types.Message, state: FSMContext):
         _pending.pop(msg.from_user.id, None)
         acc_id = db.add_account(phone, ss)
 
-        # اکانت جدید رو بلافاصله به pool وصل کن
-        try:
-            from core.pool import POOL
-            POOL.clients[phone] = c
-            POOL.all_phones.append(phone)
-            # شیفت عددی از DB بخون و به bucket درست اضافه کن
-            acc_row = db.get_account(phone)
-            shift_num = int(acc_row.get("shift", "1"))
-            if shift_num not in POOL.shifts:
-                POOL.shifts[shift_num] = []
-            POOL.shifts[shift_num].append(phone)
-        except Exception as _pe:
-            db.debug_log("handlers", "pool_add", "WARN", str(_pe))
+        # ✅ FIX: اضافه کردن hot به POOL
+        asyncio.create_task(_add_to_pool_hot(phone, ss))
 
         await msg.answer(
             f"✅ <b>اکانت اضافه شد!</b>\n"
@@ -818,7 +837,8 @@ async def add_code(msg: types.Message, state: FSMContext):
             f"👤 نام: <b>{me.first_name}</b>\n"
             f"🆔 یوزرنیم: @{me.username or 'ندارد'}\n"
             f"🎫 شناسه: <code>{acc_id}</code>\n"
-            f"👥 عضو گروه: ✅",
+            f"👥 عضو گروه: ✅\n"
+            f"🔌 در حال اتصال به Pool...",
             reply_markup=main_menu(),
             parse_mode="HTML",
         )
@@ -853,10 +873,15 @@ async def add_password(msg: types.Message, state: FSMContext):
         await c.disconnect()
         _pending.pop(msg.from_user.id, None)
         acc_id = db.add_account(phone, ss)
+
+        # ✅ FIX: اضافه کردن hot به POOL
+        asyncio.create_task(_add_to_pool_hot(phone, ss))
+
         await msg.answer(
             f"✅ <b>اکانت با 2FA اضافه شد!</b>\n\n"
             f"👤 {me.first_name}\n"
-            f"🎫 {acc_id}",
+            f"🎫 {acc_id}\n"
+            f"🔌 در حال اتصال به Pool...",
             reply_markup=main_menu(),
             parse_mode="HTML",
         )
