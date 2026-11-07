@@ -17,34 +17,38 @@ def _get_admins(key):
 
 
 class Config:
-    API_ID = _get_int("API_ID")
-    API_HASH = os.getenv("API_HASH", "")
-    BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-    BOT_NAME = os.getenv("BOT_NAME", "Master Bot")
-    ADMIN_IDS = _get_admins("ADMIN_IDS")
+    API_ID       = _get_int("API_ID")
+    API_HASH     = os.getenv("API_HASH", "")
+    BOT_TOKEN    = os.getenv("BOT_TOKEN", "")
+    BOT_NAME     = os.getenv("BOT_NAME", "Master Bot")
+    ADMIN_IDS    = _get_admins("ADMIN_IDS")
     ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY", "")
-    BASE_DIR = BASE_DIR
-    SESSION_DIR = BASE_DIR / os.getenv("SESSION_DIR", "sessions")
-    PROXY_DIR = BASE_DIR / "proxies"
-    LOG_DIR = BASE_DIR / "logs"
-    DB_PATH = BASE_DIR / os.getenv("DB_PATH", "models/tg_system.db")
-    PROXY_START_PORT = _get_int("PROXY_START_PORT", 40000)
-    LOG_CHANNEL_ID = _get_int("LOG_CHANNEL_ID", 0)
-    LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-    SHIFT_SIZE = 75
-    SHIFT_MINUTES = 30
+    BASE_DIR     = BASE_DIR
+    SESSION_DIR  = BASE_DIR / os.getenv("SESSION_DIR", "sessions")
+    PROXY_DIR    = BASE_DIR / "proxies"
+    LOG_DIR      = BASE_DIR / "logs"
 
-    # ── تارگت: فقط گروه ──
-    TARGET_GROUP_ID = _get_int("TARGET_GROUP_ID", 0)
+    # ── Supabase (جایگزین SQLite) ──────────────────────────────
+    SUPABASE_URL = os.getenv("SUPABASE_URL", "")
+    SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")   # service_role key
+
+    PROXY_START_PORT   = _get_int("PROXY_START_PORT", 40000)
+    LOG_CHANNEL_ID     = _get_int("LOG_CHANNEL_ID", 0)
+    LOG_LEVEL          = os.getenv("LOG_LEVEL", "INFO").upper()
+    SHIFT_SIZE         = 75
+    SHIFT_MINUTES      = 30
+
+    # ── تارگت ─────────────────────────────────────────────────
+    TARGET_GROUP_ID    = _get_int("TARGET_GROUP_ID", 0)
 
     AUTO_VIEW_ENABLED  = _get_int("AUTO_VIEW_ENABLED", 1) == 1
     AUTO_VIEW_DELAY_MS = _get_int("AUTO_VIEW_DELAY_MS", 0)
 
-    # ── بازه تایم شیفت (ثانیه) — از DB قابل تغییرن ──
+    # ── بازه تایم شیفت (ثانیه) ────────────────────────────────
     SHIFT_MIN_SEC: int = _get_int("SHIFT_MIN_SEC", 1500)   # 25 دقیقه
     SHIFT_MAX_SEC: int = _get_int("SHIFT_MAX_SEC", 2700)   # 45 دقیقه
 
-    # Webhook
+    # ── Webhook ────────────────────────────────────────────────
     WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL", "")
     WEBHOOK_PATH     = os.getenv("WEBHOOK_PATH", "/webhook")
     WEBHOOK_SECRET   = os.getenv("WEBHOOK_SECRET", "")
@@ -59,6 +63,8 @@ class Config:
         if not cls.BOT_TOKEN or ":" not in cls.BOT_TOKEN: e.append("BOT_TOKEN")
         if not cls.ADMIN_IDS: e.append("ADMIN_IDS")
         if len(cls.ENCRYPTION_KEY) != 32: e.append("ENCRYPTION_KEY")
+        if not cls.SUPABASE_URL or not cls.SUPABASE_URL.startswith("https://"): e.append("SUPABASE_URL")
+        if not cls.SUPABASE_KEY: e.append("SUPABASE_KEY")
         return e
 
 

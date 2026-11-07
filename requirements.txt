@@ -5,10 +5,10 @@ python-dotenv==1.0.1
 apscheduler==3.10.4
 cryptography==42.0.5
 
+# ── Supabase ───────────────────────────────────────────
+supabase>=2.9.0
+
 # ── aiogram 3 + pydantic chain (Python 3.14 pre-built wheels) ──
-# aiogram 3.31.0 requires pydantic<2.14,>=2.4.1
-# pydantic 2.13.5 requires pydantic-core==2.46.5
-# pydantic-core 2.46.5 ships a cp314 manylinux wheel — no Rust compile needed
 pydantic==2.13.5
 pydantic-core==2.46.5
 aiogram==3.31.0
