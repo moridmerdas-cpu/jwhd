@@ -150,10 +150,18 @@ async def on_shutdown(app: web.Application):
 
 
 # ── aiohttp app ────────────────────────────────────────
+async def health(request):
+    return web.Response(text="OK", status=200)
+
+
 def build_app() -> web.Application:
     app = web.Application()
     app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
+
+    # health check برای Render
+    app.router.add_get("/", health)
+    app.router.add_head("/", health)
 
     SimpleRequestHandler(
         dispatcher=dp,
