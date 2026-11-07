@@ -1,10 +1,14 @@
-"""Handler برای کنترل Anti-Lock از ربات"""
-from aiogram import types
+"""Handler برای کنترل Anti-Lock — aiogram 3.x"""
+from aiogram import Router
+from aiogram.filters import Command
+from aiogram.types import Message
 from core.anti_lock import ANTI_LOCK
 
+router = Router()
 
-async def cmd_antilock_status(message: types.Message):
-    """وضعیت anti-lock"""
+
+@router.message(Command("al_status"))
+async def cmd_antilock_status(message: Message):
     s = ANTI_LOCK.status()
     text = (
         f"🔒 <b>Anti-Lock Status</b>\n\n"
@@ -16,19 +20,13 @@ async def cmd_antilock_status(message: types.Message):
     await message.answer(text, parse_mode="HTML")
 
 
-async def cmd_antilock_resume(message: types.Message):
-    """resume دستی"""
+@router.message(Command("al_resume"))
+async def cmd_antilock_resume(message: Message):
     ANTI_LOCK.resume()
-    await message.answer("✅ Anti-Lock resum شد")
+    await message.answer("✅ Anti-Lock resume شد")
 
 
-async def cmd_antilock_pause(message: types.Message):
-    """pause دستی"""
+@router.message(Command("al_pause"))
+async def cmd_antilock_pause(message: Message):
     ANTI_LOCK.pause()
     await message.answer(f"⏸ Anti-Lock pause شد — {ANTI_LOCK.pause_duration}s")
-
-
-def register_antilock(dp):
-    dp.register_message_handler(cmd_antilock_status, commands=["al_status"])
-    dp.register_message_handler(cmd_antilock_resume, commands=["al_resume"])
-    dp.register_message_handler(cmd_antilock_pause, commands=["al_pause"])

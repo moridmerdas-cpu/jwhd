@@ -1,4 +1,4 @@
-"""Engine — Telethon Client maker + instant_view + group_read"""
+"""Engine — Telethon Client maker + instant_view"""
 import asyncio
 import sys
 from pathlib import Path
@@ -45,28 +45,9 @@ def make_client(session_string, proxy=None, phone=None):
 
 
 async def instant_view(client, channel, message_ids):
-    """برای کانال — افزایش view counter"""
     try:
         r = await client(functions.messages.GetMessagesViewsRequest(
             peer=channel, id=message_ids, increment=True))
-        return {"ok": True, "result": r}
-    except FloodWaitError as e:
-        return {"ok": False, "flood": e.seconds, "error": f"FloodWait {e.seconds}s"}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
-
-
-async def group_read(client, group, max_id):
-    """
-    برای گروه — پیام‌ها رو خوانده نشون می‌ده تا max_id
-    معادل باز کردن گروه و اسکرول تا پیام max_id
-    """
-    try:
-        r = await client(functions.messages.ReadHistoryRequest(
-            peer=group,
-            max_id=max_id,
-        ))
-        # r.pts و r.pts_count برمی‌گرده
         return {"ok": True, "result": r}
     except FloodWaitError as e:
         return {"ok": False, "flood": e.seconds, "error": f"FloodWait {e.seconds}s"}
