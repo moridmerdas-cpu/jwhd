@@ -49,17 +49,27 @@ class ClientPool:
             if not accounts:
                 return
 
-            phones = [a["phone"] for a in accounts]
-            random.shuffle(phones)
+            # شیفت‌ها از ستون shift دیتابیس خونده میشن تا لیست اکانت‌ها با pool یکی باشه
+            buckets = {1: [], 2: [], 3: [], 4: []}
+            for a in accounts:
+                sh = str(a.get("shift") or "")
+                if sh in ("1", "2", "3", "4"):
+                    buckets[int(sh)].append(a["phone"])
+            for a in accounts:
+                if not any(a["phone"] in v for v in buckets.values()):
+                    k = min(buckets, key=lambda x: len(buckets[x]))
+                    buckets[k].append(a["phone"])
+                    db.update_account_shift(a["phone"], str(k))
+            self.shifts = buckets
+            phones = [p for v in buckets.values() for p in v]
             n = len(phones)
-            base = n // 4
-            extra = n % 4
             self.all_phones = phones
-            start = 0
-            for i in range(4):
-                size = base + (1 if i < extra else 0)
-                self.shifts[i + 1] = phones[start:start + size]
-                start += size
+            try:
+                self.active_shift = int(db.get_setting("active_shift", 1) or 1)
+                if self.active_shift not in buckets:
+                    self.active_shift = 1
+            except Exception:
+                self.active_shift = 1
 
             db.debug_log("pool", "init", "OK",
                          f"total:{n} " + " ".join(f"S{k}:{len(v)}" for k, v in self.shifts.items()))
@@ -75,6 +85,7 @@ class ClientPool:
             tasks = [asyncio.create_task(one(p)) for p in phones]
             await asyncio.gather(*tasks, return_exceptions=True)
             db.debug_log("pool", "init", "DONE", f"connected:{ok[0]}/{n}")
+            await asyncio.to_thread(self.sync_status)
 
     async def _connect_one(self, phone):
         if phone in self.blacklist:
@@ -110,7 +121,37 @@ class ClientPool:
 
     def swap_cycle(self):
         self.active_shift = (self.active_shift % 4) + 1
+        self.request_status_sync()
         return self.active_shift
+
+    def sync_status(self):
+        """اکانت‌های متصلِ شیفت فعال = online، بقیه = idle (استراحت). flood/error دست نمی‌خوره."""
+        on  = [p for p in self.shifts.get(self.active_shift, []) if p in self.clients]
+        off = [p for p in self.all_phones if p not in on]
+        db.set_status_bulk(on, "online")
+        db.set_status_bulk(off, "idle")
+
+    def request_status_sync(self):
+        try:
+            asyncio.get_running_loop().create_task(asyncio.to_thread(self.sync_status))
+        except RuntimeError:
+            pass
+
+    async def add_account_live(self, phone):
+        """اکانت تازه اضافه‌شده رو بر اساس شیفت دیتابیس وارد pool می‌کنه و وصلش می‌کنه."""
+        row = db.get_account(phone)
+        sh = int(str((row or {}).get("shift") or 1))
+        sh = sh if sh in self.shifts else 1
+        self.blacklist.discard(phone)
+        if phone not in self.all_phones:
+            self.all_phones.append(phone)
+        for v in self.shifts.values():
+            if phone in v:
+                v.remove(phone)
+        self.shifts[sh].append(phone)
+        client = await self._connect_one(phone)
+        await asyncio.to_thread(self.sync_status)
+        return client
 
     async def drop(self, phone):
         c = self.clients.pop(phone, None)

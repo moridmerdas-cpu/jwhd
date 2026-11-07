@@ -44,6 +44,27 @@ async def guard(msg: types.Message) -> bool:
 guard_admin = guard
 
 
+_FA_DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
+
+
+def _normalize_phone(raw: str) -> str | None:
+    """ارقام فارسی/عربی، فاصله، خط تیره و پیشوندهای 09xx / 98xx / 00xx رو به +E.164 تبدیل می‌کنه."""
+    s = raw.translate(_FA_DIGITS)
+    s = "".join(ch for ch in s if ch.isdigit() or ch == "+")
+    if s.startswith("00"):
+        s = "+" + s[2:]
+    elif s.startswith("09") and len(s) == 11:
+        s = "+98" + s[1:]
+    elif s.startswith("98") and len(s) == 12:
+        s = "+" + s
+    elif not s.startswith("+") and s.isdigit() and len(s) >= 10:
+        s = "+" + s
+    digits = s[1:]
+    if not s.startswith("+") or not digits.isdigit() or not (10 <= len(digits) <= 15):
+        return None
+    return s
+
+
 def _get_group_id() -> int:
     return int(db.get_setting("target_group_id", 0) or 0)
 
@@ -469,6 +490,7 @@ async def cb_shift_select(cb: types.CallbackQuery):
     old = POOL.active_shift
     POOL.active_shift = shift
     db.set_setting("active_shift", shift)
+    POOL.request_status_sync()
     await cb.answer(f"✅ شیفت {old} → {shift}", show_alert=True)
     try:
         await cb.message.edit_text(
@@ -588,8 +610,8 @@ async def cb_accounts(cb: types.CallbackQuery, state: FSMContext):
         acc_id = int(d[2])
         from supabase import create_client
         sb = create_client(Config.SUPABASE_URL, Config.SUPABASE_KEY)
-        res = sb.table("accounts").select("*").eq("id", acc_id).maybe_single().execute()
-        row = res.data
+        res = sb.table("accounts").select("*").eq("id", acc_id).limit(1).execute()
+        row = res.data[0] if res and res.data else None
         if row:
             a    = row
             icon = {"online": "🟢", "flood": "🟡", "error": "🔴", "idle": "💤"}.get(a["status"], "⚪")
@@ -724,11 +746,17 @@ async def add_account_start(msg: types.Message, state: FSMContext):
 @router.message(StateFilter(AddAccount.waiting_phone))
 async def add_phone(msg: types.Message, state: FSMContext):
     if not await guard_admin(msg): return
-    phone = msg.text.strip()
-    if not phone.startswith("+") or len(phone) < 10:
+    phone = _normalize_phone(msg.text or "")
+    if not phone:
         await msg.answer("❌ فرمت اشتباه. مثال: <code>+989123456789</code>", parse_mode="HTML")
         return
-    if db.get_account(phone):
+    try:
+        exists = db.get_account(phone)
+    except Exception as e:
+        db.debug_log("handlers", "add_phone", "ERROR", f"{type(e).__name__}: {e}")
+        await msg.answer(f"❌ خطای دیتابیس: <code>{type(e).__name__}: {str(e)[:150]}</code>", parse_mode="HTML")
+        return
+    if exists:
         await msg.answer("⚠️ این شماره قبلاً ثبت شده.")
         await state.clear()
         return
@@ -783,19 +811,13 @@ async def add_code(msg: types.Message, state: FSMContext):
         _pending.pop(msg.from_user.id, None)
         acc_id = db.add_account(phone, ss)
 
-        # اکانت جدید رو بلافاصله به pool وصل کن
+        # اکانت جدید رو بلافاصله وارد pool کن (با کلاینت تازه، نه کلاینت قطع‌شده)
+        pool_ok = False
         try:
             from core.pool import POOL
-            POOL.clients[phone] = c
-            POOL.all_phones.append(phone)
-            # شیفت عددی از DB بخون و به bucket درست اضافه کن
-            acc_row = db.get_account(phone)
-            shift_num = int(acc_row.get("shift", "1"))
-            if shift_num not in POOL.shifts:
-                POOL.shifts[shift_num] = []
-            POOL.shifts[shift_num].append(phone)
+            pool_ok = await asyncio.wait_for(POOL.add_account_live(phone), timeout=40) is not None
         except Exception as _pe:
-            db.debug_log("handlers", "pool_add", "WARN", str(_pe))
+            db.debug_log("handlers", "pool_add", "WARN", f"{type(_pe).__name__}: {_pe}")
 
         await msg.answer(
             f"✅ <b>اکانت اضافه شد!</b>\n"
@@ -803,7 +825,8 @@ async def add_code(msg: types.Message, state: FSMContext):
             f"👤 نام: <b>{me.first_name}</b>\n"
             f"🆔 یوزرنیم: @{me.username or 'ندارد'}\n"
             f"🎫 شناسه: <code>{acc_id}</code>\n"
-            f"👥 عضو گروه: ✅",
+            f"👥 عضو گروه: ✅\n"
+            f"🔌 اتصال به pool: {'✅' if pool_ok else '⚠️ بعداً خودکار وصل میشه'}",
             reply_markup=main_menu(),
             parse_mode="HTML",
         )
@@ -868,5 +891,25 @@ async def add_cancel(cb: types.CallbackQuery, state: FSMContext):
 # ─────────────────────────────────────────────────────────
 # register
 # ─────────────────────────────────────────────────────────
+async def _on_error(event: types.ErrorEvent):
+    exc = event.exception
+    db.debug_log("handlers", "unhandled", "ERROR", f"{type(exc).__name__}: {exc}")
+    upd = event.update
+    chat = None
+    if upd.message:
+        chat = upd.message.chat.id
+    elif upd.callback_query and upd.callback_query.message:
+        chat = upd.callback_query.message.chat.id
+    if chat:
+        try:
+            await upd.bot.send_message(
+                chat, f"⚠️ <b>خطای داخلی</b>\n<code>{type(exc).__name__}: {str(exc)[:200]}</code>",
+                parse_mode="HTML")
+        except Exception:
+            pass
+    return True
+
+
 def register_handlers(dp):
     dp.include_router(router)
+    dp.errors.register(_on_error)

@@ -55,19 +55,41 @@ def init_db():
 
 # ── migrate: شیفت A/B/C/D → 1/2/3/4 ─────────────────────────
 def migrate_shifts():
-    """یه‌بار اجرا میشه — شیفت‌های legacy رو تبدیل می‌کنه."""
+    """هر اکانتی که شیفتش 1..4 نیست (A/B/C/D قدیمی یا خالی) رو بین ۴ شیفت متعادل پخش می‌کنه."""
     sb = _get_client()
-    legacy_map = {"A": "1", "B": "2", "C": "3", "D": "4"}
-    for old, new in legacy_map.items():
-        sb.table("accounts").update({"shift": new}).eq("shift", old).execute()
-    print("✅ مایگریشن شیفت انجام شد (A/B/C/D → 1/2/3/4)")
+    rows = sb.table("accounts").select("id, phone, shift").order("id").execute().data or []
+    buckets = {"1": 0, "2": 0, "3": 0, "4": 0}
+    legacy = []
+    for r in rows:
+        sh = str(r.get("shift") or "")
+        if sh in buckets:
+            buckets[sh] += 1
+        else:
+            legacy.append(r["phone"])
+    for phone in legacy:
+        target = min(buckets, key=lambda k: buckets[k])
+        sb.table("accounts").update({"shift": target}).eq("phone", phone).execute()
+        buckets[target] += 1
+    if legacy:
+        print(f"✅ مایگریشن شیفت: {len(legacy)} اکانت → {buckets}", flush=True)
+
+
+def set_status_bulk(phones: list, status: str, only_from=("online", "idle")):
+    """وضعیت چند اکانت رو با چند درخواست دسته‌ای عوض می‌کنه، بدون دست‌زدن به flood/error."""
+    if not phones:
+        return
+    sb = _get_client()
+    for i in range(0, len(phones), 100):
+        chunk = phones[i:i + 100]
+        sb.table("accounts").update({"status": status}) \
+          .in_("phone", chunk).in_("status", list(only_from)).execute()
 
 
 # ── Settings helpers ──────────────────────────────────────────
 def get_setting(key: str, default=None):
     sb = _get_client()
-    res = sb.table("settings").select("value").eq("key", key).maybe_single().execute()
-    return res.data["value"] if res.data else default
+    res = sb.table("settings").select("value").eq("key", key).limit(1).execute()
+    return res.data[0]["value"] if res and res.data else default
 
 
 def set_setting(key: str, value):
@@ -101,8 +123,8 @@ def add_account(phone: str, ss: str, pp: int | None = None) -> int:
 
 def get_account(phone: str) -> dict | None:
     sb = _get_client()
-    res = sb.table("accounts").select("*").eq("phone", phone).maybe_single().execute()
-    return res.data or None
+    res = sb.table("accounts").select("*").eq("phone", phone).limit(1).execute()
+    return res.data[0] if res and res.data else None
 
 
 def get_all_accounts() -> list[dict]:

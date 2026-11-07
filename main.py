@@ -95,11 +95,10 @@ async def on_startup(app: web.Application):
     webhook_url = f"{Config.WEBHOOK_BASE_URL}{Config.WEBHOOK_PATH}"
     current_wh  = await bot.get_webhook_info()
     if current_wh.url != webhook_url:
-        await bot.set_webhook(
-            url=webhook_url,
-            secret_token=Config.WEBHOOK_SECRET,
-            drop_pending_updates=True,
-        )
+        wh_kwargs = dict(url=webhook_url, drop_pending_updates=True)
+        if Config.WEBHOOK_SECRET:
+            wh_kwargs["secret_token"] = Config.WEBHOOK_SECRET
+        await bot.set_webhook(**wh_kwargs)
         log.info(f"🔗 Webhook ثبت شد: {webhook_url}")
     else:
         log.info(f"🔗 Webhook قبلاً ثبته، رجیستر مجدد نمیشه: {webhook_url}")
@@ -168,7 +167,7 @@ def build_app() -> web.Application:
     SimpleRequestHandler(
         dispatcher=dp,
         bot=bot,
-        secret_token=Config.WEBHOOK_SECRET,
+        secret_token=Config.WEBHOOK_SECRET or None,
     ).register(app, path=Config.WEBHOOK_PATH)
 
     setup_application(app, dp, bot=bot)

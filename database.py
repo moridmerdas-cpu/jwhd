@@ -62,9 +62,9 @@ def init_db():
 # ── Settings helpers ──────────────────────────────────────────
 def get_setting(key: str, default=None):
     sb = _get_client()
-    res = sb.table("settings").select("value").eq("key", key).maybe_single().execute()
-    if res.data:
-        return res.data["value"]
+    res = sb.table("settings").select("value").eq("key", key).limit(1).execute()
+    if res and res.data:
+        return res.data[0]["value"]
     return default
 
 
@@ -104,8 +104,8 @@ def add_account(phone: str, ss: str, pp: int | None = None) -> int:
 
 def get_account(phone: str) -> dict | None:
     sb = _get_client()
-    res = sb.table("accounts").select("*").eq("phone", phone).maybe_single().execute()
-    return res.data or None
+    res = sb.table("accounts").select("*").eq("phone", phone).limit(1).execute()
+    return res.data[0] if res and res.data else None
 
 
 def get_all_accounts() -> list[dict]:
