@@ -7,8 +7,14 @@ load_dotenv(BASE_DIR / ".env")
 
 
 def _get_int(key, default=0):
-    try: return int(os.getenv(key, default))
-    except (ValueError, TypeError): return default
+    val = os.getenv(key)
+    if val is None:
+        return default
+    val = val.strip()
+    try:
+        return int(val)
+    except (ValueError, TypeError):
+        return default
 
 
 def _get_admins(key):
@@ -54,7 +60,9 @@ class Config:
         if not cls.BOT_TOKEN or ":" not in cls.BOT_TOKEN: e.append("BOT_TOKEN")
         if not cls.ADMIN_IDS: e.append("ADMIN_IDS")
         if len(cls.ENCRYPTION_KEY) != 32: e.append("ENCRYPTION_KEY")
-        if not cls.TARGET_GROUP_ID: e.append("TARGET_GROUP_ID")
+        if not cls.TARGET_GROUP_ID:
+            raw = os.getenv("TARGET_GROUP_ID", "NOT_SET")
+            e.append(f"TARGET_GROUP_ID (مقدار فعلی: '{raw}' — باید عدد منفی مثل -1001234567890 باشه)")
         return e
 
 
