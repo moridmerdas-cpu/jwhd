@@ -64,6 +64,7 @@ async def on_startup(app: web.Application):
         raise SystemExit(1)
 
     db.init_db()
+    db.migrate_shifts()   # یه‌بار اجرا — شیفت A/B قدیمی → 1/2/3/4
     db.debug_log("main", "startup", "OK", Config.BOT_NAME)
 
     from core.pool import POOL
@@ -92,12 +93,16 @@ async def on_startup(app: web.Application):
         log.warning("⚠️ گروه هدف تنظیم نشده — ویو غیرفعال")
 
     webhook_url = f"{Config.WEBHOOK_BASE_URL}{Config.WEBHOOK_PATH}"
-    await bot.set_webhook(
-        url=webhook_url,
-        secret_token=Config.WEBHOOK_SECRET,
-        drop_pending_updates=True,
-    )
-    log.info(f"🔗 Webhook ثبت شد: {webhook_url}")
+    current_wh  = await bot.get_webhook_info()
+    if current_wh.url != webhook_url:
+        await bot.set_webhook(
+            url=webhook_url,
+            secret_token=Config.WEBHOOK_SECRET,
+            drop_pending_updates=True,
+        )
+        log.info(f"🔗 Webhook ثبت شد: {webhook_url}")
+    else:
+        log.info(f"🔗 Webhook قبلاً ثبته، رجیستر مجدد نمیشه: {webhook_url}")
 
     mn = db.get_setting("shift_min_sec", Config.SHIFT_MIN_SEC)
     mx = db.get_setting("shift_max_sec", Config.SHIFT_MAX_SEC)
@@ -122,10 +127,8 @@ async def on_startup(app: web.Application):
 # ── shutdown ───────────────────────────────────────────
 async def on_shutdown(app: web.Application):
     log.info("🛑 خاموش کردن...")
-    try:
-        await bot.delete_webhook()
-    except Exception:
-        pass
+    # delete_webhook حذف شد — باعث می‌شد هر deploy نیاز به re-register داشته باشه
+    # webhook روی Render با URL ثابت نیازی به حذف نداره
 
     obj = dp.get("group_listener")
     if obj:

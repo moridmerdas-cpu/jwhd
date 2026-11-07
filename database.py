@@ -1,173 +1,195 @@
-"""
-models/database.py  —  نسخه Supabase
-جایگزین SQLite با supabase-py v2
-همه function signature ها با نسخه قبلی سازگار هستن.
-"""
-import base64, hashlib, sys
+import sqlite3, base64, hashlib, sys
 from pathlib import Path
-from datetime import datetime, timezone
 from cryptography.fernet import Fernet
-from supabase import create_client, Client
-
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from config import Config
 
-# ── Supabase client (singleton) ───────────────────────────────
-_supabase: Client | None = None
-
-def _get_client() -> Client:
-    global _supabase
-    if _supabase is None:
-        _supabase = create_client(Config.SUPABASE_URL, Config.SUPABASE_KEY)
-    return _supabase
+DB_PATH = Config.DB_PATH
+DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 
-# ── رمزنگاری session ──────────────────────────────────────────
-def _get_fernet() -> Fernet:
+def _get_fernet():
     kb = hashlib.sha256(Config.ENCRYPTION_KEY.encode()).digest()
     return Fernet(base64.urlsafe_b64encode(kb))
 
+
 FERNET = _get_fernet()
-
-def encrypt(t: str) -> str:
-    return FERNET.encrypt(t.encode()).decode()
-
-def decrypt(t: str) -> str:
-    return FERNET.decrypt(t.encode()).decode()
+def encrypt(t): return FERNET.encrypt(t.encode()).decode()
+def decrypt(t): return FERNET.decrypt(t.encode()).decode()
 
 
-# ── init_db ───────────────────────────────────────────────────
+def get_conn():
+    c = sqlite3.connect(str(DB_PATH), timeout=30, isolation_level=None)
+    c.row_factory = sqlite3.Row
+    c.execute("PRAGMA journal_mode=WAL")
+    c.execute("PRAGMA busy_timeout=30000")
+    return c
+
+
 def init_db():
-    """
-    در Supabase جداول از قبل با supabase_schema.sql ساخته شدن.
-    این تابع فقط مقادیر پیش‌فرض settings رو چک می‌کنه.
-    """
-    sb = _get_client()
-    defaults = {
-        "target_group_id":   str(Config.TARGET_GROUP_ID),
-        "shift_min_sec":     str(Config.SHIFT_MIN_SEC),
-        "shift_max_sec":     str(Config.SHIFT_MAX_SEC),
-        "active_shift":      "1",
-        "auto_view_enabled": "1",
-    }
-    for key, value in defaults.items():
-        # upsert با on_conflict=ignore
-        sb.table("settings").upsert(
-            {"key": key, "value": value},
-            ignore_duplicates=True
-        ).execute()
-    print("✅ Supabase آماده شد")
+    c = get_conn()
+    try:
+        c.executescript("""
+        CREATE TABLE IF NOT EXISTS accounts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            phone TEXT UNIQUE NOT NULL,
+            session_encrypted TEXT NOT NULL,
+            proxy_port INTEGER,
+            status TEXT DEFAULT 'idle',
+            shift TEXT DEFAULT 'A',
+            flood_until TEXT,
+            last_error TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS debug_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            module TEXT, step TEXT, status TEXT, message TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+        """)
+        # مقادیر پیش‌فرض تنظیمات
+        c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('target_group_id', ?)",
+                  (str(Config.TARGET_GROUP_ID),))
+        c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('shift_min_sec', ?)",
+                  (str(Config.SHIFT_MIN_SEC),))
+        c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('shift_max_sec', ?)",
+                  (str(Config.SHIFT_MAX_SEC),))
+        c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('active_shift', '1')")
+        c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('auto_view_enabled', '1')")
+    finally:
+        c.close()
+    print("✅ دیتابیس آماده شد")
 
 
-# ── Settings helpers ──────────────────────────────────────────
+# ── Settings helpers ──────────────────────────────────────
 def get_setting(key: str, default=None):
-    sb = _get_client()
-    res = sb.table("settings").select("value").eq("key", key).maybe_single().execute()
-    if res.data:
-        return res.data["value"]
-    return default
+    c = get_conn()
+    try:
+        r = c.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+        return r["value"] if r else default
+    finally:
+        c.close()
 
 
 def set_setting(key: str, value):
-    sb = _get_client()
-    sb.table("settings").upsert({"key": key, "value": str(value)}).execute()
+    c = get_conn()
+    try:
+        c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+                  (key, str(value)))
+    finally:
+        c.close()
 
 
 def get_all_settings() -> dict:
-    sb = _get_client()
-    res = sb.table("settings").select("key, value").execute()
-    return {r["key"]: r["value"] for r in res.data}
+    c = get_conn()
+    try:
+        return {r["key"]: r["value"] for r in c.execute("SELECT key, value FROM settings").fetchall()}
+    finally:
+        c.close()
 
 
-# ── Account helpers ───────────────────────────────────────────
-def add_account(phone: str, ss: str, pp: int | None = None) -> int:
-    sb = _get_client()
-
-    # تعداد کل اکانت‌ها برای تعیین شیفت
-    count_res = sb.table("accounts").select("id", count="exact").execute()
-    count = count_res.count or 0
-
-    half = 75
-    shift = "A" if (count // half) % 2 == 0 else "B"
-
-    res = sb.table("accounts").insert({
-        "phone":             phone,
-        "session_encrypted": encrypt(ss),
-        "proxy_port":        pp,
-        "shift":             shift,
-    }).execute()
-
-    new_id = res.data[0]["id"]
-    print(f"✅ اکانت {phone} اضافه شد → شیفت {shift} (شماره {count + 1})", flush=True)
-    return new_id
+# ── Account helpers ───────────────────────────────────────
+def add_account(phone, ss, pp=None):
+    c = get_conn()
+    try:
+        row = c.execute("SELECT COUNT(*) as cnt FROM accounts").fetchone()
+        count = row["cnt"]
+        # شیفت‌های عددی 1-4 هماهنگ با pool.py
+        shift = str((count % 4) + 1)
+        cur = c.execute(
+            "INSERT INTO accounts (phone, session_encrypted, proxy_port, shift) VALUES (?, ?, ?, ?)",
+            (phone, encrypt(ss), pp, shift))
+        new_id = cur.lastrowid
+        print(f"✅ اکانت {phone} اضافه شد → شیفت {shift} (شماره {count+1})", flush=True)
+        return new_id
+    finally:
+        c.close()
 
 
-def get_account(phone: str) -> dict | None:
-    sb = _get_client()
-    res = sb.table("accounts").select("*").eq("phone", phone).maybe_single().execute()
-    return res.data or None
+def get_account(phone):
+    c = get_conn()
+    try:
+        r = c.execute("SELECT * FROM accounts WHERE phone = ?", (phone,)).fetchone()
+        return dict(r) if r else None
+    finally: c.close()
 
 
-def get_all_accounts() -> list[dict]:
-    sb = _get_client()
-    res = sb.table("accounts").select("*").order("id").execute()
-    return res.data
+def get_all_accounts():
+    c = get_conn()
+    try:
+        return [dict(r) for r in c.execute("SELECT * FROM accounts ORDER BY id").fetchall()]
+    finally: c.close()
 
 
-def get_accounts_by_shift(s: str) -> list[dict]:
-    sb = _get_client()
-    res = sb.table("accounts").select("*").eq("shift", s).execute()
-    return res.data
+def get_accounts_by_shift(s):
+    c = get_conn()
+    try:
+        return [dict(r) for r in c.execute("SELECT * FROM accounts WHERE shift=?", (s,)).fetchall()]
+    finally: c.close()
 
 
-def update_account_status(phone: str, status: str, error: str | None = None, until=None):
-    sb = _get_client()
-    payload: dict = {"status": status, "last_error": error}
-    if until is not None:
-        # until می‌تونه string یا datetime باشه
-        payload["flood_until"] = until if isinstance(until, str) else until.isoformat()
-    sb.table("accounts").update(payload).eq("phone", phone).execute()
+def update_account_status(phone, status, error=None, until=None):
+    c = get_conn()
+    try:
+        c.execute("UPDATE accounts SET status=?, last_error=?, flood_until=?, updated_at=CURRENT_TIMESTAMP WHERE phone=?",
+                  (status, error, until, phone))
+    finally: c.close()
 
 
-def update_account_shift(phone: str, shift: str):
-    sb = _get_client()
-    sb.table("accounts").update({"shift": shift}).eq("phone", phone).execute()
+def update_account_shift(phone, shift):
+    c = get_conn()
+    try:
+        c.execute("UPDATE accounts SET shift=? WHERE phone=?", (shift, phone))
+    finally: c.close()
 
 
-def get_session(phone: str) -> str | None:
+def get_session(phone):
     a = get_account(phone)
     return decrypt(a["session_encrypted"]) if a else None
 
 
-def delete_account(phone: str):
-    sb = _get_client()
-    sb.table("accounts").delete().eq("phone", phone).execute()
+def delete_account(phone):
+    c = get_conn()
+    try:
+        c.execute("DELETE FROM accounts WHERE phone=?", (phone,))
+    finally: c.close()
 
 
-def count_by_status() -> dict:
-    """
-    Supabase از GROUP BY مستقیم پشتیبانی نمی‌کنه؛
-    با یه کوئری ساده حساب می‌کنیم.
-    """
-    sb = _get_client()
-    res = sb.table("accounts").select("status").execute()
-    counts: dict = {}
-    for row in res.data:
-        s = row["status"]
-        counts[s] = counts.get(s, 0) + 1
-    return counts
+def count_by_status():
+    c = get_conn()
+    try:
+        return {r["status"]: r["cnt"] for r in c.execute("SELECT status, COUNT(*) as cnt FROM accounts GROUP BY status").fetchall()}
+    finally: c.close()
 
 
-# ── Debug log ─────────────────────────────────────────────────
-def debug_log(module: str, step: str, status: str, message: str = ""):
+def migrate_shifts():
+    """تبدیل شیفت‌های قدیمی A/B/C/D به عددی 1/2/3/4"""
+    legacy_map = {"A": "1", "B": "2", "C": "3", "D": "4"}
+    c = get_conn()
+    try:
+        rows = c.execute("SELECT phone, shift FROM accounts WHERE shift IN ('A','B','C','D')").fetchall()
+        if not rows:
+            return
+        for r in rows:
+            new_shift = legacy_map.get(r["shift"], "1")
+            c.execute("UPDATE accounts SET shift=? WHERE phone=?", (new_shift, r["phone"]))
+        print(f"✅ مایگریشن شیفت: {len(rows)} اکانت تبدیل شدن (A/B/C/D → 1/2/3/4)", flush=True)
+    finally:
+        c.close()
+
+
+def debug_log(module, step, status, message=""):
     print(f"[{status}] {module}.{step}: {message}", flush=True)
     try:
-        sb = _get_client()
-        sb.table("debug_log").insert({
-            "module":  module,
-            "step":    step,
-            "status":  status,
-            "message": message,
-        }).execute()
+        c = get_conn()
+        try:
+            c.execute("INSERT INTO debug_log (module, step, status, message) VALUES (?, ?, ?, ?)",
+                      (module, step, status, message))
+        finally: c.close()
     except Exception as e:
         print(f"[LOG-FAIL] {e}", flush=True)
