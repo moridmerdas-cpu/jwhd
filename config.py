@@ -27,6 +27,7 @@ class Config:
     SESSION_DIR  = BASE_DIR / os.getenv("SESSION_DIR", "sessions")
     PROXY_DIR    = BASE_DIR / "proxies"
     LOG_DIR      = BASE_DIR / "logs"
+    DB_PATH      = BASE_DIR / os.getenv("DB_PATH", "data/bot.db")
 
     # ── Supabase (جایگزین SQLite) ──────────────────────────────
     SUPABASE_URL = os.getenv("SUPABASE_URL", "")
