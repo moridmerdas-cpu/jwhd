@@ -1,146 +1,130 @@
-"""کیبوردها — aiogram 3.x"""
+"""کیبوردها — aiogram 3"""
 from aiogram.types import (
     ReplyKeyboardMarkup, KeyboardButton,
     InlineKeyboardMarkup, InlineKeyboardButton,
 )
+from aiogram.utils.keyboard import ReplyKeyboardBuilder, InlineKeyboardBuilder
 
 
-def main_menu():
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="➕ افزودن اکانت"),  KeyboardButton(text="📊 وضعیت زنده")],
-            [KeyboardButton(text="👥 مدیریت اکانت‌ها"), KeyboardButton(text="📈 آمار پیشرفته")],
-            [KeyboardButton(text="🎬 روشن/خاموش ویو"),  KeyboardButton(text="🔄 چرخش دستی")],
-            [KeyboardButton(text="⚙️ تنظیمات"),         KeyboardButton(text="📢 کانال هدف")],
-            [KeyboardButton(text="❓ راهنما")],
-        ],
-        resize_keyboard=True,
-    )
+def main_menu() -> ReplyKeyboardMarkup:
+    b = ReplyKeyboardBuilder()
+    b.row(KeyboardButton(text="➕ افزودن اکانت"),  KeyboardButton(text="📊 وضعیت زنده"))
+    b.row(KeyboardButton(text="👥 مدیریت اکانت‌ها"), KeyboardButton(text="📈 آمار پیشرفته"))
+    b.row(KeyboardButton(text="🎬 روشن/خاموش ویو"),  KeyboardButton(text="🔄 چرخش دستی"))
+    b.row(KeyboardButton(text="⚙️ تنظیمات"),          KeyboardButton(text="📢 کانال هدف"))
+    b.row(KeyboardButton(text="❓ راهنما"))
+    return b.as_markup(resize_keyboard=True)
 
 
-def view_toggle_menu(current_paused: bool):
-    rows = []
+def view_toggle_menu(current_paused: bool) -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
     if current_paused:
-        rows.append([InlineKeyboardButton(text="▶️ روشن کردن ویو", callback_data="view:resume")])
+        b.button(text="▶️ روشن کردن ویو",  callback_data="view:resume")
     else:
-        rows.append([InlineKeyboardButton(text="⏸️ توقف ویو", callback_data="view:pause")])
-    rows.append([InlineKeyboardButton(text="🔄 بروزرسانی وضعیت", callback_data="view:refresh")])
-    rows.append([InlineKeyboardButton(text="🔙 برگشت", callback_data="menu:main")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+        b.button(text="⏸️  توقف ویو",       callback_data="view:pause")
+    b.button(text="🔄 بروزرسانی وضعیت",    callback_data="view:refresh")
+    b.button(text="🔙 برگشت",               callback_data="menu:main")
+    b.adjust(1)
+    return b.as_markup()
 
 
-def status_menu():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="🟢 آنلاین",  callback_data="status:online"),
-            InlineKeyboardButton(text="💤 idle",    callback_data="status:idle"),
-            InlineKeyboardButton(text="🔴 خطا",    callback_data="status:error"),
-        ],
-        [
-            InlineKeyboardButton(text="🟡 Flood",   callback_data="status:flood"),
-            InlineKeyboardButton(text="📊 کل",      callback_data="status:all"),
-            InlineKeyboardButton(text="🔙 برگشت",   callback_data="menu:main"),
-        ],
-        [InlineKeyboardButton(text="🔄 بروزرسانی زنده", callback_data="status:refresh")],
-    ])
+def status_menu() -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    b.button(text="🟢 آنلاین",         callback_data="status:online")
+    b.button(text="💤 idle",           callback_data="status:idle")
+    b.button(text="🔴 خطا",            callback_data="status:error")
+    b.button(text="🟡 Flood",          callback_data="status:flood")
+    b.button(text="📊 کل",             callback_data="status:all")
+    b.button(text="🔙 برگشت",          callback_data="menu:main")
+    b.button(text="🔄 بروزرسانی زنده", callback_data="status:refresh")
+    b.adjust(3, 3, 1)
+    return b.as_markup()
 
 
-def accounts_menu():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="📋 لیست کامل",   callback_data="acc:list:0"),
-            InlineKeyboardButton(text="➕ افزودن جدید",  callback_data="acc:add"),
-        ],
-        [
-            InlineKeyboardButton(text="🔄 چرخش فوری",   callback_data="acc:rotate"),
-            InlineKeyboardButton(text="🧹 حذف flood‌ها", callback_data="acc:cleanup"),
-        ],
-        [
-            InlineKeyboardButton(text="📥 بکاپ الان",   callback_data="acc:backup"),
-            InlineKeyboardButton(text="🔙 برگشت",        callback_data="menu:main"),
-        ],
-    ])
+def accounts_menu() -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    b.button(text="📋 لیست کامل",   callback_data="acc:list:0")
+    b.button(text="➕ افزودن جدید", callback_data="acc:add")
+    b.button(text="🔄 چرخش فوری",  callback_data="acc:rotate")
+    b.button(text="🧹 حذف flood‌ها",callback_data="acc:cleanup")
+    b.button(text="📥 بکاپ الان",   callback_data="acc:backup")
+    b.button(text="🔙 برگشت",       callback_data="menu:main")
+    b.adjust(2)
+    return b.as_markup()
 
 
-def accounts_list_kb(accounts, page=0, per_page=10):
-    s = page * per_page
-    e = s + per_page
-    total_pages = max(1, (len(accounts) + per_page - 1) // per_page)
-    rows = []
+def accounts_list_kb(accounts: list, page: int = 0, per_page: int = 10) -> InlineKeyboardMarkup:
+    b   = InlineKeyboardBuilder()
+    s   = page * per_page
+    e   = s + per_page
+    tot = (len(accounts) + per_page - 1) // per_page
+
     for a in accounts[s:e]:
         icon = {"online": "🟢", "flood": "🟡", "error": "🔴",
                 "idle": "💤", "dead": "⚫"}.get(a.get("status", "idle"), "⚪")
         shift_icon = "🅰️" if a.get("shift") == "A" else "🅱️"
-        rows.append([InlineKeyboardButton(
-            text=f"{icon} {shift_icon} {a['phone']}",
-            callback_data=f"acc:info:{a['id']}"
-        )])
+        b.button(text=f"{icon} {shift_icon} {a['phone']}",
+                 callback_data=f"acc:info:{a['id']}")
+    b.adjust(1)
+
     nav = []
     if page > 0:
-        nav.append(InlineKeyboardButton(text="⬅️ قبلی", callback_data=f"acc:list:{page-1}"))
-    nav.append(InlineKeyboardButton(text=f"📄 {page+1}/{total_pages}", callback_data="acc:noop"))
+        nav.append(InlineKeyboardButton(text="⬅️ قبلی",     callback_data=f"acc:list:{page-1}"))
+    nav.append(    InlineKeyboardButton(text=f"📄 {page+1}/{tot}", callback_data="acc:noop"))
     if e < len(accounts):
-        nav.append(InlineKeyboardButton(text="بعدی ➡️", callback_data=f"acc:list:{page+1}"))
-    if nav:
-        rows.append(nav)
-    rows.append([
-        InlineKeyboardButton(text="🔄 رفرش",    callback_data=f"acc:list:{page}"),
-        InlineKeyboardButton(text="🔙 برگشت",   callback_data="menu:accounts"),
-    ])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+        nav.append(InlineKeyboardButton(text="بعدی ➡️",     callback_data=f"acc:list:{page+1}"))
+
+    b.row(*nav)
+    b.row(
+        InlineKeyboardButton(text="🔄 رفرش",   callback_data=f"acc:list:{page}"),
+        InlineKeyboardButton(text="🔙 برگشت",  callback_data="menu:accounts"),
+    )
+    return b.as_markup()
 
 
-def stats_menu():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="📊 آمار کلی",      callback_data="stats:general"),
-            InlineKeyboardButton(text="📈 آمار ۲۴ ساعت",  callback_data="stats:daily"),
-        ],
-        [
-            InlineKeyboardButton(text="🌐 وضعیت WARP",    callback_data="stats:warp"),
-            InlineKeyboardButton(text="🔄 چرخه شیفت",     callback_data="stats:shift"),
-        ],
-        [
-            InlineKeyboardButton(text="📉 نمودار موفقیت", callback_data="stats:chart"),
-            InlineKeyboardButton(text="🔙 برگشت",          callback_data="menu:main"),
-        ],
-    ])
+def stats_menu() -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    b.button(text="📊 آمار کلی",       callback_data="stats:general")
+    b.button(text="📈 آمار ۲۴ ساعت",   callback_data="stats:daily")
+    b.button(text="🌐 وضعیت WARP",     callback_data="stats:warp")
+    b.button(text="🔄 چرخه شیفت",      callback_data="stats:shift")
+    b.button(text="📉 نمودار موفقیت",  callback_data="stats:chart")
+    b.button(text="🔙 برگشت",          callback_data="menu:main")
+    b.adjust(2)
+    return b.as_markup()
 
 
-def settings_menu():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="⏱️ طول شیفت",     callback_data="set:shift"),
-            InlineKeyboardButton(text="👥 تعداد فعال",   callback_data="set:active"),
-        ],
-        [
-            InlineKeyboardButton(text="🛡️ وضعیت نگهبان", callback_data="set:guardian"),
-            InlineKeyboardButton(text="💾 بکاپ",          callback_data="set:backup"),
-        ],
-        [
-            InlineKeyboardButton(text="📊 WARP",          callback_data="set:warp"),
-            InlineKeyboardButton(text="🔙 برگشت",         callback_data="menu:main"),
-        ],
-    ])
+def settings_menu() -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    b.button(text="⏱️ طول شیفت",     callback_data="set:shift")
+    b.button(text="👥 تعداد فعال",   callback_data="set:active")
+    b.button(text="🛡️ وضعیت نگهبان",callback_data="set:guardian")
+    b.button(text="💾 بکاپ",         callback_data="set:backup")
+    b.button(text="📊 WARP",         callback_data="set:warp")
+    b.button(text="🔙 برگشت",        callback_data="menu:main")
+    b.adjust(2)
+    return b.as_markup()
 
 
-def channel_menu():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👥 عضویت همه اکانت‌ها", callback_data="ch:join")],
-        [InlineKeyboardButton(text="📊 چک عضویت‌ها",         callback_data="ch:check")],
-        [InlineKeyboardButton(text="📢 نمایش کانال فعلی",    callback_data="ch:info")],
-        [InlineKeyboardButton(text="🔙 برگشت",                callback_data="menu:main")],
-    ])
+def channel_menu() -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    b.button(text="👥 عضویت همه اکانت‌ها", callback_data="ch:join")
+    b.button(text="📊 چک عضویت‌ها",         callback_data="ch:check")
+    b.button(text="📢 نمایش کانال فعلی",    callback_data="ch:info")
+    b.button(text="🔙 برگشت",               callback_data="menu:main")
+    b.adjust(1)
+    return b.as_markup()
 
 
-def confirm_menu(action):
-    return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="✅ بله", callback_data=f"cfm:yes:{action}"),
-        InlineKeyboardButton(text="❌ خیر", callback_data=f"cfm:no:{action}"),
-    ]])
+def confirm_menu(action: str) -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    b.button(text="✅ بله", callback_data=f"cfm:yes:{action}")
+    b.button(text="❌ خیر", callback_data=f"cfm:no:{action}")
+    b.adjust(2)
+    return b.as_markup()
 
 
-def cancel_menu():
-    return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="❌ انصراف", callback_data="add:cancel")
-    ]])
+def cancel_menu() -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    b.button(text="❌ انصراف", callback_data="add:cancel")
+    return b.as_markup()

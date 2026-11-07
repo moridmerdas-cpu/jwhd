@@ -36,8 +36,15 @@ class Config:
     TARGET_CHANNEL_ID = _get_int("TARGET_CHANNEL_ID", 0)
     TARGET_CHANNEL_USERNAME = os.getenv("TARGET_CHANNEL_USERNAME", "")
     TARGET_GROUP_ID = _get_int("TARGET_GROUP_ID", 0)
-    AUTO_VIEW_ENABLED = _get_int("AUTO_VIEW_ENABLED", 1) == 1
+    AUTO_VIEW_ENABLED  = _get_int("AUTO_VIEW_ENABLED", 1) == 1
     AUTO_VIEW_DELAY_MS = _get_int("AUTO_VIEW_DELAY_MS", 0)
+
+    # Webhook
+    WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL", "")          # https://yourdomain.com
+    WEBHOOK_PATH     = os.getenv("WEBHOOK_PATH", "/webhook")       # /webhook
+    WEBHOOK_SECRET   = os.getenv("WEBHOOK_SECRET", "")             # توکن امنیتی تصادفی
+    WEBHOOK_HOST     = os.getenv("WEBHOOK_HOST", "0.0.0.0")
+    WEBHOOK_PORT     = _get_int("WEBHOOK_PORT", 8443)
 
     @classmethod
     def validate(cls):

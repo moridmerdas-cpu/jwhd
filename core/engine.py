@@ -67,3 +67,18 @@ async def health_check(client):
         return {"status": "banned"}
     except Exception as e:
         return {"status": "error", "error": str(e)}
+
+
+async def instant_read(client, group_entity):
+    """ReadHistory برای گروه — پیام‌های خوانده‌نشده رو read می‌کنه"""
+    try:
+        from telethon import functions as _fn
+        r = await client(_fn.messages.ReadHistoryRequest(
+            peer=group_entity,
+            max_id=0,
+        ))
+        return {"ok": True, "result": r}
+    except FloodWaitError as e:
+        return {"ok": False, "flood": e.seconds, "error": f"FloodWait {e.seconds}s"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
