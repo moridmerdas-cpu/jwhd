@@ -166,15 +166,18 @@ def build_app() -> web.Application:
 
 
 if __name__ == "__main__":
+    import os as _os
+    # Render متغیر PORT رو خودش ست می‌کنه — اولویت با اون
+    _port = int(_os.environ.get("PORT", Config.WEBHOOK_PORT))
     print(f"""
 ╔══════════════════════════════════════╗
 ║      🤖 {Config.BOT_NAME}
 ║      ادمین‌ها: {Config.ADMIN_IDS}
-║      پورت: {Config.WEBHOOK_PORT}
+║      پورت: {_port}
 ╚══════════════════════════════════════╝
     """)
     web.run_app(
         build_app(),
-        host=Config.WEBHOOK_HOST,
-        port=Config.WEBHOOK_PORT,
+        host="0.0.0.0",
+        port=_port,
     )
