@@ -568,12 +568,11 @@ async def cb_accounts(cb: types.CallbackQuery, state: FSMContext):
         await cb.message.edit_text(_status_text(), reply_markup=status_menu(), parse_mode="HTML")
 
     elif action == "cleanup":
-        conn = db.get_conn()
-        try:
-            r = conn.execute("UPDATE accounts SET status='idle', flood_until=NULL WHERE status='flood'")
-            n = r.rowcount
-        finally:
-            conn.close()
+        from supabase import create_client
+        sb = create_client(Config.SUPABASE_URL, Config.SUPABASE_KEY)
+        res = sb.table("accounts").select("id", count="exact").eq("status", "flood").execute()
+        n = res.count or 0
+        sb.table("accounts").update({"status": "idle", "flood_until": None}).eq("status", "flood").execute()
         await cb.answer(f"✅ {n} اکانت آزاد شد", show_alert=True)
 
     elif action == "backup":
@@ -586,13 +585,12 @@ async def cb_accounts(cb: types.CallbackQuery, state: FSMContext):
 
     elif action == "info":
         acc_id = int(d[2])
-        conn   = db.get_conn()
-        try:
-            row = conn.execute("SELECT * FROM accounts WHERE id=?", (acc_id,)).fetchone()
-        finally:
-            conn.close()
+        from supabase import create_client
+        sb = create_client(Config.SUPABASE_URL, Config.SUPABASE_KEY)
+        res = sb.table("accounts").select("*").eq("id", acc_id).maybe_single().execute()
+        row = res.data
         if row:
-            a    = dict(row)
+            a    = row
             icon = {"online": "🟢", "flood": "🟡", "error": "🔴", "idle": "💤"}.get(a["status"], "⚪")
             text = (
                 f"<b>📱 اکانت #{acc_id}</b>\n"
@@ -632,20 +630,15 @@ async def cb_stats(cb: types.CallbackQuery):
             f"💤 استراحت: <b>{counts.get('idle', 0)}</b>\n"
             f"🟡 Flood: <b>{counts.get('flood', 0)}</b>\n"
             f"🔴 خطا: <b>{counts.get('error', 0)}</b>\n\n"
-            f"🅰️ شیفت A: <b>{sum(1 for a in accounts if a['shift']=='A')}</b>\n"
-            f"🅱️ شیفت B: <b>{sum(1 for a in accounts if a['shift']=='B')}</b>",
+            f"1️⃣ شیفت 1: <b>{sum(1 for a in accounts if a['shift']=='1')}</b>\n"
+            f"2️⃣ شیفت 2: <b>{sum(1 for a in accounts if a['shift']=='2')}</b>\n"
+            f"3️⃣ شیفت 3: <b>{sum(1 for a in accounts if a['shift']=='3')}</b>\n"
+            f"4️⃣ شیفت 4: <b>{sum(1 for a in accounts if a['shift']=='4')}</b>",
             reply_markup=stats_menu(), parse_mode="HTML",
         )
 
     elif data == "daily":
-        conn = db.get_conn()
-        try:
-            msgs = conn.execute(
-                "SELECT COUNT(*) FROM debug_log WHERE step='new_msg' "
-                "AND created_at >= datetime('now', '-24 hours')"
-            ).fetchone()[0]
-        finally:
-            conn.close()
+        msgs = db.count_debug_log_since("new_msg", hours=24)
         await cb.message.edit_text(
             f"📈 <b>آمار ۲۴ ساعت</b>\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
             f"📨 پیام‌های جدید: <b>{msgs}</b>\n",
@@ -671,19 +664,10 @@ async def cb_stats(cb: types.CallbackQuery):
         )
 
     elif data == "chart":
-        conn = db.get_conn()
-        try:
-            rows = conn.execute(
-                "SELECT substr(created_at, 1, 13) as h, COUNT(*) as ok "
-                "FROM debug_log WHERE step='read_done' AND status='RESULT' "
-                "AND created_at >= datetime('now', '-12 hours') "
-                "GROUP BY h ORDER BY h"
-            ).fetchall()
-        finally:
-            conn.close()
+        rows = db.chart_reads_last_12h()
         text = "📉 <b>نمودار ۱۲ ساعت</b>\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
         for r in rows:
-            h   = str(r["h"])[11:13]
+            h   = r["h"]
             ok  = r["ok"] or 0
             bar = "▰" * min(ok, 20) + "▱" * max(0, 20 - min(ok, 20))
             text += f"<code>{h}:00</code> {bar} <b>{ok}</b>\n"
