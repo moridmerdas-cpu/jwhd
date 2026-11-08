@@ -303,8 +303,14 @@ async def set_group_id(msg: types.Message, state: FSMContext):
     except Exception as e:
         text += f"\n⚠️ ذخیره شد ولی گروه پیدا نشد:\n<code>{str(e)[:150]}</code>"
 
-    await msg.answer(text + "\n\n✅ لیسنر خودش گروه جدید رو برمی‌داره.",
-                     reply_markup=main_menu(), parse_mode="HTML")
+    try:
+        from core.listener import ensure_group_listener
+        gl = await ensure_group_listener()
+        gl._settings_ts = 0.0          # تنظیمات رو سریع دوباره بخونه
+        text += "\n\n✅ لیسنر روشنه و گروه جدید رو برمی‌داره."
+    except Exception as e:
+        text += f"\n\n⚠️ لیسنر روشن نشد: <code>{str(e)[:100]}</code>"
+    await msg.answer(text, reply_markup=main_menu(), parse_mode="HTML")
     await state.clear()
 
 
@@ -323,6 +329,38 @@ async def cb_group(cb: types.CallbackQuery):
 
     elif data == "info":
         await cb.answer(f"🎯 گروه: {db.fmt_group(group_id)}", show_alert=True)
+
+    elif data == "diag":
+        await cb.answer()
+        from core.listener import get_group_listener, ensure_group_listener
+        gl = get_group_listener()
+        if gl is None or not gl.is_running:
+            if not group_id:
+                await cb.message.answer("❌ گروه هدف تنظیم نشده.")
+                return
+            gl = await ensure_group_listener()
+            await asyncio.sleep(3)
+        await cb.message.answer(gl.diag_text(), parse_mode="HTML")
+
+    elif data == "test":
+        await cb.answer("⏳ تست روی آخرین پیام...")
+        from core.listener import get_group_listener, ensure_group_listener
+        gl = get_group_listener() or await ensure_group_listener()
+        try:
+            txt = await asyncio.wait_for(gl.test_round(), timeout=60)
+        except Exception as e:
+            txt = f"❌ تست شکست خورد:\n<code>{type(e).__name__}: {str(e)[:200]}</code>"
+        await cb.message.answer(txt, parse_mode="HTML")
+
+    elif data == "mode":
+        from core.listener import get_group_listener, _MODES, _MODE_FA
+        cur = db.get_setting("group_action", "both")
+        nxt = _MODES[(_MODES.index(cur) + 1) % len(_MODES)] if cur in _MODES else "both"
+        db.set_setting("group_action", nxt)
+        gl = get_group_listener()
+        if gl:
+            gl.mode = nxt
+        await cb.answer(f"⚙️ عملیات: {_MODE_FA[nxt]}", show_alert=True)
 
     try:
         await cb.answer()

@@ -69,14 +69,11 @@ async def health_check(client):
         return {"status": "error", "error": str(e)}
 
 
-async def instant_read(client, group_entity):
-    """ReadHistory برای گروه — پیام‌های خوانده‌نشده رو read می‌کنه"""
+async def instant_read(client, entity, max_id=0):
+    """علامت خوانده‌شد. send_read_acknowledge خودش برای کانال/سوپرگروه
+    channels.ReadHistory و برای چت معمولی messages.ReadHistory رو انتخاب می‌کنه."""
     try:
-        from telethon import functions as _fn
-        r = await client(_fn.messages.ReadHistoryRequest(
-            peer=group_entity,
-            max_id=0,
-        ))
+        r = await client.send_read_acknowledge(entity, max_id=max_id or None)
         return {"ok": True, "result": r}
     except FloodWaitError as e:
         return {"ok": False, "flood": e.seconds, "error": f"FloodWait {e.seconds}s"}

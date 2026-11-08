@@ -40,16 +40,15 @@ register_handlers(dp)
 
 # ── watchdog: Group Listener ───────────────────────────
 async def group_listener_watchdog():
+    """هر ۳۰ ثانیه: اگه گروه تنظیم شده و ویو فعاله ولی لیسنر نمی‌چرخه، روشنش می‌کنه."""
+    from core.listener import ensure_group_listener
     await asyncio.sleep(25)
     while True:
         try:
-            t = dp.get("group_listener_task")
-            if t is None or t.done():
-                log.warning("🔴 Group Listener مرده — راه‌اندازی مجدد")
-                from core.listener import GroupListener
-                gl = GroupListener()
-                dp["group_listener"]      = gl
-                dp["group_listener_task"] = asyncio.create_task(gl.start())
+            gid  = await asyncio.to_thread(db.get_target_group)
+            auto = await asyncio.to_thread(db.get_setting, "auto_view_enabled", "1")
+            if gid and auto == "1":
+                await ensure_group_listener()
         except Exception as e:
             log.exception(f"group watchdog: {e}")
         await asyncio.sleep(30)
@@ -83,6 +82,9 @@ async def webhook_watchdog():
         await asyncio.sleep(120)
 
 
+_bg_tasks: set = set()
+
+
 # ── boot در پس‌زمینه: پورت زود باز میشه، اکانت‌ها بعدش وصل میشن ──
 async def boot_pool_and_listener():
     from core.pool import POOL
@@ -103,16 +105,16 @@ async def boot_pool_and_listener():
 
     if auto_view and group_id:
         try:
-            from core.listener import GroupListener
-            gl = GroupListener()
-            dp["group_listener"]          = gl
-            dp["group_listener_task"]     = asyncio.create_task(gl.start())
-            dp["group_listener_watchdog"] = asyncio.create_task(group_listener_watchdog())
-            log.info(f"👥 Group Listener روشن — group={group_id}")
+            from core.listener import ensure_group_listener
+            await ensure_group_listener()
+            log.info(f"👥 Group Listener روشن — group={db.fmt_group(group_id)}")
         except Exception as e:
             log.exception(f"Group Listener: {e}")
     else:
-        log.warning("⚠️ گروه هدف تنظیم نشده — ویو غیرفعال")
+        log.warning("⚠️ گروه هدف تنظیم نشده — ویو غیرفعال (بعد از تنظیم گروه، خودکار روشن میشه)")
+    # watchdog همیشه می‌چرخه تا گروهی که بعداً از ربات تنظیم میشه هم لیسنر بگیره
+    app_dp_task = asyncio.create_task(group_listener_watchdog())
+    _bg_tasks.add(app_dp_task)
 
     mn = db.get_setting("shift_min_sec", Config.SHIFT_MIN_SEC)
     mx = db.get_setting("shift_max_sec", Config.SHIFT_MAX_SEC)
@@ -153,6 +155,8 @@ async def on_startup(app: web.Application):
 # ── shutdown ───────────────────────────────────────────
 async def on_shutdown(app: web.Application):
     log.info("🛑 خاموش کردن...")
+    for t in list(_bg_tasks):
+        t.cancel()
     for key in ("webhook_watchdog", "boot_task"):
         t = app.get(key)
         if t:
@@ -160,7 +164,8 @@ async def on_shutdown(app: web.Application):
     # delete_webhook حذف شد — باعث می‌شد هر deploy نیاز به re-register داشته باشه
     # webhook روی Render با URL ثابت نیازی به حذف نداره
 
-    obj = dp.get("group_listener")
+    from core.listener import get_group_listener
+    obj = get_group_listener()
     if obj:
         try:
             await asyncio.wait_for(obj.stop(), timeout=10)

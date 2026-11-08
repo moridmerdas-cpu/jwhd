@@ -226,19 +226,36 @@ def count_by_status() -> dict:
     return counts
 
 
-# ── Debug log ─────────────────────────────────────────────────
+# ── Debug log (در thread جدا، حلقه‌ی asyncio رو قفل نمی‌کنه) ───
+import threading as _threading
+import queue as _queue
+
+_LOGQ: "_queue.Queue" = _queue.Queue(maxsize=2000)
+_log_thread = None
+_log_lock = _threading.Lock()
+
+
+def _log_worker():
+    sb = create_client(Config.SUPABASE_URL, Config.SUPABASE_KEY)   # کلاینت جدا برای thread
+    while True:
+        row = _LOGQ.get()
+        try:
+            sb.table("debug_log").insert(row).execute()
+        except Exception as e:
+            print(f"[LOG-FAIL] {e}", flush=True)
+
+
 def debug_log(module: str, step: str, status: str, message: str = ""):
+    global _log_thread
     print(f"[{status}] {module}.{step}: {message}", flush=True)
+    with _log_lock:
+        if _log_thread is None:
+            _log_thread = _threading.Thread(target=_log_worker, daemon=True, name="debug-log")
+            _log_thread.start()
     try:
-        sb = _get_client()
-        sb.table("debug_log").insert({
-            "module":  module,
-            "step":    step,
-            "status":  status,
-            "message": message,
-        }).execute()
-    except Exception as e:
-        print(f"[LOG-FAIL] {e}", flush=True)
+        _LOGQ.put_nowait({"module": module, "step": step, "status": status, "message": message})
+    except _queue.Full:
+        pass
 
 
 # ── Supabase stats helpers (جایگزین raw SQL) ─────────────────
