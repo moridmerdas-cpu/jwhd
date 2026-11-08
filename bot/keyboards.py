@@ -138,11 +138,14 @@ def shift_timing_menu() -> InlineKeyboardMarkup:
 
 
 def shift_select_menu(current: int) -> InlineKeyboardMarkup:
-    """منوی انتخاب شیفت فعال (۱ تا ۴)"""
+    """منوی انتخاب شیفت فعال (۱ تا ۴) + حالت همه شیفت‌ها (0)"""
     b = InlineKeyboardBuilder()
     for i in range(1, 5):
         mark = "✅ " if i == current else ""
         b.button(text=f"{mark}شیفت {i}", callback_data=f"shift:select:{i}")
+    # دکمه همه شیفت‌ها
+    all_mark = "✅ " if current == 0 else ""
+    b.button(text=f"{all_mark}🌐 همه شیفت‌ها", callback_data="shift:select:0")
     b.button(text="🔙 برگشت", callback_data="menu:main")
     b.adjust(2)
     return b.as_markup()

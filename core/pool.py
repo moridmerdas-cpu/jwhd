@@ -30,7 +30,7 @@ class ClientPool:
         self.clients = {}
         self.all_phones = []
         self.shifts = {1: [], 2: [], 3: [], 4: []}
-        self.active_shift = 1
+        self.active_shift = 1   # 0 = همه شیفت‌ها با هم
         self.lock = asyncio.Lock()
         self._initialized = False
         self.blacklist = set()          # فقط اکانت‌های بدون session
@@ -70,7 +70,7 @@ class ClientPool:
             self.all_phones = phones
             try:
                 self.active_shift = int(db.get_setting("active_shift", 1) or 1)
-                if self.active_shift not in buckets:
+                if self.active_shift not in (0, 1, 2, 3, 4):
                     self.active_shift = 1
             except Exception:
                 self.active_shift = 1
@@ -142,9 +142,13 @@ class ClientPool:
         await asyncio.gather(*(one(p) for p in phones), return_exceptions=True)
 
     async def activate_shift(self, shift):
-        """شیفت رو فعال می‌کنه، اکانت‌هاش رو واقعاً وصل می‌کنه، وضعیت‌ها رو sync می‌کنه و گزارش می‌ده."""
+        """شیفت رو فعال می‌کنه، اکانت‌هاش رو واقعاً وصل می‌کنه، وضعیت‌ها رو sync می‌کنه و گزارش می‌ده.
+        shift=0 یعنی همه شیفت‌ها با هم فعال بشن."""
         self.active_shift = shift
-        phones = list(self.shifts.get(shift, []))
+        if shift == 0:
+            phones = list(self.all_phones)
+        else:
+            phones = list(self.shifts.get(shift, []))
         await self.ensure_connected(phones, force=True)
         await asyncio.to_thread(self._safe_sync)
         live = [p for p in phones if self._is_live(p)]
@@ -165,16 +169,23 @@ class ClientPool:
         return await self._connect_one(phone)
 
     def active_phones(self):
+        """لیست اکانت‌های فعال — اگه شیفت 0 بود همه اکانت‌ها برمیگرده."""
+        if self.active_shift == 0:
+            return list(self.all_phones)
         return self.shifts.get(self.active_shift, [])
 
     def swap_cycle(self):
+        """چرخش شیفت — اگه حالت همه شیفت‌ها (0) فعاله، چرخش نمیشه."""
+        if self.active_shift == 0:
+            return 0   # حالت all-shifts: scheduler دست نمیزنه
         self.active_shift = (self.active_shift % 4) + 1
         self.request_status_sync()
         return self.active_shift
 
     def sync_status(self):
         """اکانت‌های متصلِ شیفت فعال = online، بقیه = idle (استراحت). flood/error دست نمی‌خوره."""
-        on  = [p for p in self.shifts.get(self.active_shift, []) if self._is_live(p)]
+        active = self.all_phones if self.active_shift == 0 else self.shifts.get(self.active_shift, [])
+        on  = [p for p in active if self._is_live(p)]
         off = [p for p in self.all_phones if p not in on]
         db.set_status_bulk(on, "online")
         db.set_status_bulk(off, "idle")
@@ -190,7 +201,8 @@ class ClientPool:
     def request_status_sync(self):
         async def job():
             try:
-                await self.ensure_connected(self.shifts.get(self.active_shift, []))
+                phones_to_ensure = self.all_phones if self.active_shift == 0 else self.shifts.get(self.active_shift, [])
+                await self.ensure_connected(phones_to_ensure)
                 await asyncio.to_thread(self._safe_sync)
             except Exception as e:
                 db.debug_log("pool", "sync_job", "ERROR", f"{type(e).__name__}: {e}")

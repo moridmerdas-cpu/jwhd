@@ -462,10 +462,11 @@ async def cb_settings(cb: types.CallbackQuery, state: FSMContext):
     elif data == "shift_active":
         from core.pool import POOL
         active = POOL.active_shift
+        active_label = "🌐 همه شیفت‌ها" if active == 0 else f"شیفت {active}"
         await cb.message.edit_text(
             f"🔢 <b>انتخاب شیفت فعال</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"شیفت فعلی: <b>{active}</b>\n\n"
+            f"شیفت فعلی: <b>{active_label}</b>\n\n"
             f"👇 شیفت مورد نظر رو انتخاب کن:",
             reply_markup=shift_select_menu(active),
             parse_mode="HTML",
@@ -555,19 +556,39 @@ async def cb_shift_select(cb: types.CallbackQuery):
     shift = int(cb.data.split(":")[2])
     from core.pool import POOL
     old = POOL.active_shift
-    await cb.answer(f"⏳ شیفت {old} → {shift} | در حال اتصال اکانت‌ها...")
+
+    # پیام انتظار
+    old_label = "همه شیفت‌ها" if old == 0 else f"شیفت {old}"
+    new_label  = "همه شیفت‌ها" if shift == 0 else f"شیفت {shift}"
+    await cb.answer(f"⏳ {old_label} → {new_label} | در حال اتصال اکانت‌ها...")
+
     db.set_setting("active_shift", shift)
     try:
-        rep = await asyncio.wait_for(POOL.activate_shift(shift), timeout=90)
+        rep = await asyncio.wait_for(POOL.activate_shift(shift), timeout=120)
     except Exception as e:
-        rep = {"total": len(POOL.shifts.get(shift, [])), "connected": 0,
+        total = len(POOL.all_phones) if shift == 0 else len(POOL.shifts.get(shift, []))
+        rep = {"total": total, "connected": 0,
                "errors": {"-": f"{type(e).__name__}: {e}"}}
-    text = (
-        f"🔢 <b>شیفت فعال</b>\n\n✅ شیفت <b>{shift}</b> فعال شد.\n"
-        f"🟢 متصل: <b>{rep['connected']}/{rep['total']}</b>"
-    )
-    if rep["total"] == 0:
-        text += "\n\n⚠️ این شیفت هیچ اکانتی نداره."
+
+    if shift == 0:
+        # حالت همه شیفت‌ها — جزئیات هر شیفت رو نشون میده
+        shift_detail = "\n".join(
+            f"  شیفت {i}: {len(POOL.shifts.get(i,[]))} اکانت"
+            for i in range(1, 5)
+        )
+        text = (
+            f"🌐 <b>همه شیفت‌ها فعال شدن</b>\n\n"
+            f"🟢 متصل: <b>{rep['connected']}/{rep['total']}</b>\n\n"
+            f"{shift_detail}"
+        )
+    else:
+        text = (
+            f"🔢 <b>شیفت فعال</b>\n\n✅ شیفت <b>{shift}</b> فعال شد.\n"
+            f"🟢 متصل: <b>{rep['connected']}/{rep['total']}</b>"
+        )
+        if rep["total"] == 0:
+            text += "\n\n⚠️ این شیفت هیچ اکانتی نداره."
+
     for phone, err in list(rep["errors"].items())[:8]:
         text += f"\n🔴 <code>{phone}</code>\n    <code>{err[:110]}</code>"
     try:
@@ -720,8 +741,11 @@ async def cb_stats(cb: types.CallbackQuery):
     if data == "general":
         accounts = db.get_all_accounts()
         counts   = db.count_by_status()
+        from core.pool import POOL
+        active_lbl = "🌐 همه شیفت‌ها" if POOL.active_shift == 0 else f"شیفت {POOL.active_shift}"
         await cb.message.edit_text(
             f"📊 <b>آمار کلی</b>\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"🔢 شیفت فعال: <b>{active_lbl}</b>\n"
             f"👥 کل اکانت: <b>{len(accounts)}</b>\n"
             f"🟢 آنلاین: <b>{counts.get('online', 0)}</b>\n"
             f"💤 استراحت: <b>{counts.get('idle', 0)}</b>\n"

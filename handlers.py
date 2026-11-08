@@ -344,11 +344,12 @@ async def show_settings(msg: types.Message):
     mx = int(db.get_setting("shift_max_sec", Config.SHIFT_MAX_SEC)) // 60
     from core.pool import POOL
     active = POOL.active_shift
+    active_lbl = "🌐 همه شیفت‌ها" if active == 0 else f"شیفت {active}"
     await msg.answer(
         f"⚙️ <b>تنظیمات</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"⏱️ بازه شیفت: <b>{mn}-{mx} دقیقه</b>\n"
-        f"🔢 شیفت فعال: <b>{active}</b>\n\n"
+        f"🔢 شیفت فعال: <b>{active_lbl}</b>\n\n"
         f"👇 گزینه مورد نظر:",
         reply_markup=settings_menu(),
         parse_mode="HTML",
@@ -374,10 +375,11 @@ async def cb_settings(cb: types.CallbackQuery, state: FSMContext):
     elif data == "shift_active":
         from core.pool import POOL
         active = POOL.active_shift
+        active_lbl = "🌐 همه شیفت‌ها" if active == 0 else f"شیفت {active}"
         await cb.message.edit_text(
             f"🔢 <b>انتخاب شیفت فعال</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"شیفت فعلی: <b>{active}</b>\n\n"
+            f"شیفت فعلی: <b>{active_lbl}</b>\n\n"
             f"👇 شیفت مورد نظر رو انتخاب کن:",
             reply_markup=shift_select_menu(active),
             parse_mode="HTML",
@@ -464,15 +466,30 @@ async def cb_shift_select(cb: types.CallbackQuery):
     shift = int(cb.data.split(":")[2])
     from core.pool import POOL
     old = POOL.active_shift
-    POOL.active_shift = shift
+    old_lbl = "همه شیفت‌ها" if old == 0 else f"شیفت {old}"
+    new_lbl = "همه شیفت‌ها" if shift == 0 else f"شیفت {shift}"
     db.set_setting("active_shift", shift)
-    await cb.answer(f"✅ شیفت {old} → {shift}", show_alert=True)
     try:
-        await cb.message.edit_text(
-            f"🔢 <b>شیفت فعال</b>\n\n✅ شیفت <b>{shift}</b> فعال شد.",
-            reply_markup=shift_select_menu(shift),
-            parse_mode="HTML",
+        import asyncio
+        rep = await asyncio.wait_for(POOL.activate_shift(shift), timeout=120)
+        connected = rep["connected"]
+        total = rep["total"]
+    except Exception:
+        POOL.active_shift = shift
+        connected, total = 0, 0
+    await cb.answer(f"✅ {old_lbl} → {new_lbl}", show_alert=True)
+    if shift == 0:
+        text = (
+            f"🌐 <b>همه شیفت‌ها فعال شدن</b>\n"
+            f"🟢 متصل: <b>{connected}/{total}</b>"
         )
+    else:
+        text = (
+            f"🔢 <b>شیفت فعال</b>\n\n✅ شیفت <b>{shift}</b> فعال شد.\n"
+            f"🟢 متصل: <b>{connected}/{total}</b>"
+        )
+    try:
+        await cb.message.edit_text(text, reply_markup=shift_select_menu(shift), parse_mode="HTML")
     except Exception:
         pass
 
