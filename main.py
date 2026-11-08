@@ -55,57 +55,67 @@ async def group_listener_watchdog():
         await asyncio.sleep(30)
 
 
-# ── startup ────────────────────────────────────────────
-async def on_startup(app: web.Application):
-    errs = Config.validate()
-    if errs:
-        for e in errs:
-            log.error(f"  - {e}")
-        raise SystemExit(1)
+# ── webhook ────────────────────────────────────────────
+def _webhook_url() -> str:
+    return f"{Config.WEBHOOK_BASE_URL}{Config.WEBHOOK_PATH}"
 
-    db.init_db()
-    db.migrate_shifts()   # یه‌بار اجرا — شیفت A/B قدیمی → 1/2/3/4
-    db.debug_log("main", "startup", "OK", Config.BOT_NAME)
 
+async def register_webhook(drop_pending: bool = False):
+    """همیشه ثبت می‌کنه. تلگرام secret_token رو برنمی‌گردونه، پس نمیشه فهمید عوض شده یا نه."""
+    kwargs = dict(url=_webhook_url(), drop_pending_updates=drop_pending)
+    if Config.WEBHOOK_SECRET:
+        kwargs["secret_token"] = Config.WEBHOOK_SECRET
+    await bot.set_webhook(**kwargs)
+    log.info(f"🔗 Webhook ثبت شد: {_webhook_url()}")
+
+
+async def webhook_watchdog():
+    """اگه webhook از بیرون پاک یا عوض بشه (مثلاً instance قدیمی موقع دیپلوی) دوباره ثبتش می‌کنه."""
+    await asyncio.sleep(60)
+    while True:
+        try:
+            info = await bot.get_webhook_info()
+            if info.url != _webhook_url():
+                log.warning(f"🔴 Webhook پاک/عوض شده بود ({info.url!r}) — ثبت مجدد")
+                await register_webhook()
+        except Exception as e:
+            log.warning(f"webhook watchdog: {type(e).__name__}: {e}")
+        await asyncio.sleep(120)
+
+
+# ── boot در پس‌زمینه: پورت زود باز میشه، اکانت‌ها بعدش وصل میشن ──
+async def boot_pool_and_listener():
     from core.pool import POOL
-    log.info("🔌 اتصال همه اکانت‌ها...")
-    await POOL.init()
-    log.info(
-        f"✅ Pool: {len(POOL.clients)}/{len(POOL.all_phones)} | "
-        + " ".join(f"S{k}:{len(v)}" for k, v in POOL.shifts.items())
-    )
+    try:
+        log.info("🔌 اتصال همه اکانت‌ها...")
+        await POOL.init()
+        log.info(
+            f"✅ Pool: {len(POOL.clients)}/{len(POOL.all_phones)} | "
+            + " ".join(f"S{k}:{len(v)}" for k, v in POOL.shifts.items())
+        )
+    except Exception as e:
+        log.exception(f"POOL.init: {e}")
+    finally:
+        POOL.ready.set()
 
-    # گروه هدف از DB
-    group_id = int(db.get_setting("target_group_id", 0) or 0)
+    group_id  = int(db.get_setting("target_group_id", 0) or 0)
     auto_view = db.get_setting("auto_view_enabled", "1") == "1"
 
     if auto_view and group_id:
         try:
             from core.listener import GroupListener
             gl = GroupListener()
-            dp["group_listener"]             = gl
-            dp["group_listener_task"]        = asyncio.create_task(gl.start())
-            dp["group_listener_watchdog"]    = asyncio.create_task(group_listener_watchdog())
+            dp["group_listener"]          = gl
+            dp["group_listener_task"]     = asyncio.create_task(gl.start())
+            dp["group_listener_watchdog"] = asyncio.create_task(group_listener_watchdog())
             log.info(f"👥 Group Listener روشن — group={group_id}")
         except Exception as e:
             log.exception(f"Group Listener: {e}")
     else:
         log.warning("⚠️ گروه هدف تنظیم نشده — ویو غیرفعال")
 
-    webhook_url = f"{Config.WEBHOOK_BASE_URL}{Config.WEBHOOK_PATH}"
-    current_wh  = await bot.get_webhook_info()
-    if current_wh.url != webhook_url:
-        wh_kwargs = dict(url=webhook_url, drop_pending_updates=True)
-        if Config.WEBHOOK_SECRET:
-            wh_kwargs["secret_token"] = Config.WEBHOOK_SECRET
-        await bot.set_webhook(**wh_kwargs)
-        log.info(f"🔗 Webhook ثبت شد: {webhook_url}")
-    else:
-        log.info(f"🔗 Webhook قبلاً ثبته، رجیستر مجدد نمیشه: {webhook_url}")
-
     mn = db.get_setting("shift_min_sec", Config.SHIFT_MIN_SEC)
     mx = db.get_setting("shift_max_sec", Config.SHIFT_MAX_SEC)
-
     for admin_id in Config.ADMIN_IDS:
         try:
             await bot.send_message(
@@ -115,17 +125,38 @@ async def on_startup(app: web.Application):
                 f"🎯 گروه هدف: <code>{group_id or 'تنظیم نشده'}</code>\n"
                 f"⏱️ شیفت: {int(mn)//60}-{int(mx)//60} دقیقه تصادفی\n"
                 f"✅ شیفت فعال: {POOL.active_shift}\n"
-                f"🌐 Webhook: {webhook_url}",
+                f"🌐 Webhook: {_webhook_url()}",
             )
         except Exception as e:
             log.warning(f"admin {admin_id}: {e}")
-
     log.info("✅ ربات آماده است")
+
+
+# ── startup ────────────────────────────────────────────
+async def on_startup(app: web.Application):
+    errs = Config.validate()
+    if errs:
+        for e in errs:
+            log.error(f"  - {e}")
+        raise SystemExit(1)
+
+    db.init_db()
+    db.migrate_shifts()
+    db.debug_log("main", "startup", "OK", Config.BOT_NAME)
+
+    # webhook اول از همه، قبل از کار سنگین، تا ربات از همون ثانیه‌ی اول جواب بده
+    await register_webhook(drop_pending=True)
+    app["webhook_watchdog"] = asyncio.create_task(webhook_watchdog())
+    app["boot_task"]        = asyncio.create_task(boot_pool_and_listener())
 
 
 # ── shutdown ───────────────────────────────────────────
 async def on_shutdown(app: web.Application):
     log.info("🛑 خاموش کردن...")
+    for key in ("webhook_watchdog", "boot_task"):
+        t = app.get(key)
+        if t:
+            t.cancel()
     # delete_webhook حذف شد — باعث می‌شد هر deploy نیاز به re-register داشته باشه
     # webhook روی Render با URL ثابت نیازی به حذف نداره
 

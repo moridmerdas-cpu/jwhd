@@ -37,6 +37,7 @@ class ClientPool:
         self.errors = {}                # phone -> آخرین دلیل شکست اتصال
         self._retry_after = {}          # phone -> زمانی که اجازه تلاش مجدد داریم
         self._bg = set()
+        self.ready = asyncio.Event()    # بعد از پایان init ست میشه
 
     async def init(self):
         if self._initialized:
@@ -202,6 +203,10 @@ class ClientPool:
 
     async def add_account_live(self, phone):
         """اکانت تازه اضافه‌شده رو بر اساس شیفت دیتابیس وارد pool می‌کنه و وصلش می‌کنه."""
+        try:
+            await asyncio.wait_for(self.ready.wait(), timeout=30)
+        except asyncio.TimeoutError:
+            pass
         row = db.get_account(phone)
         sh = int(str((row or {}).get("shift") or 1))
         sh = sh if sh in self.shifts else 1

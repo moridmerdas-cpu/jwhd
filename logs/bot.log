@@ -1,0 +1,10 @@
+2026-11-08 03:10:34,539 | INFO | master_bot | 🔗 Webhook ثبت شد: https://x.onrender.com/webhook
+2026-11-08 03:10:34,540 | INFO | master_bot | 🔌 اتصال همه اکانت‌ها...
+2026-11-08 03:10:34,542 | INFO | aiohttp.access | 127.0.0.1 [08/Nov/2026:03:10:34 +0000] "GET / HTTP/1.1" 200 154 "-" "Python/3.12 aiohttp/3.14.5"
+2026-11-08 03:10:35,141 | WARNING | master_bot | 🔴 Webhook پاک/عوض شده بود ('') — ثبت مجدد
+2026-11-08 03:10:35,142 | INFO | master_bot | 🔗 Webhook ثبت شد: https://x.onrender.com/webhook
+2026-11-08 03:10:37,542 | INFO | master_bot | ✅ Pool: 0/0 | S1:0 S2:0 S3:0 S4:0
+2026-11-08 03:10:37,542 | WARNING | master_bot | ⚠️ گروه هدف تنظیم نشده — ویو غیرفعال
+2026-11-08 03:10:37,542 | INFO | master_bot | ✅ ربات آماده است
+2026-11-08 03:10:38,044 | INFO | master_bot | 🛑 خاموش کردن...
+2026-11-08 03:10:38,044 | INFO | master_bot | 🛑 ربات خاموش شد
