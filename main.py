@@ -98,7 +98,7 @@ async def boot_pool_and_listener():
     finally:
         POOL.ready.set()
 
-    group_id  = int(db.get_setting("target_group_id", 0) or 0)
+    group_id  = db.get_target_group()
     auto_view = db.get_setting("auto_view_enabled", "1") == "1"
 
     if auto_view and group_id:
@@ -122,7 +122,7 @@ async def boot_pool_and_listener():
                 admin_id,
                 f"🚀 <b>{Config.BOT_NAME}</b> روشن شد!\n"
                 f"👥 اکانت: {len(POOL.clients)}/{len(POOL.all_phones)}\n"
-                f"🎯 گروه هدف: <code>{group_id or 'تنظیم نشده'}</code>\n"
+                f"🎯 گروه هدف: <code>{db.fmt_group(group_id)}</code>\n"
                 f"⏱️ شیفت: {int(mn)//60}-{int(mx)//60} دقیقه تصادفی\n"
                 f"✅ شیفت فعال: {POOL.active_shift}\n"
                 f"🌐 Webhook: {_webhook_url()}",

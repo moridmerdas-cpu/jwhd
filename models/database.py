@@ -103,6 +103,60 @@ def get_all_settings() -> dict:
     return {r["key"]: r["value"] for r in res.data}
 
 
+# ── Group ref: یوزرنیم یا آیدی عددی، منبع واحد ────────────────
+import re as _re
+_USERNAME_RE = _re.compile(r"^[A-Za-z][A-Za-z0-9_]{3,31}$")
+_FA_DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
+
+
+def normalize_group_id(n: int) -> int:
+    """آیدی سوپرگروه/کانال همیشه -100xxxxxxxxxx ـه. اگه منفی‌ش افتاده باشه (1004488904522) درستش می‌کنه."""
+    n = int(n or 0)
+    if n > 0 and str(n).startswith("100") and len(str(n)) >= 12:
+        return -n
+    return n
+
+
+def parse_group_ref(raw):
+    """ورودی کاربر رو به یوزرنیم (str) یا آیدی عددی (int) تبدیل می‌کنه. نامعتبر => None.
+    قبول می‌کنه: @name | name | t.me/name | https://t.me/name | t.me/c/123/45 | -100123... | 100123..."""
+    s = str(raw or "").strip().translate(_FA_DIGITS).strip("/ ")
+    if not s:
+        return None
+    m = _re.match(r"^(?:https?://)?(?:www\.)?(?:t|telegram)\.me/c/(\d+)(?:/\d+)*/?$", s, _re.I)
+    if m:
+        return int(f"-100{m.group(1)}")
+    m = _re.match(r"^(?:https?://)?(?:www\.)?(?:t|telegram)\.me/(.+)$", s, _re.I)
+    if m:
+        part = m.group(1).split("?")[0].split("/")[0]
+        if part.startswith("+") or part.lower() == "joinchat":
+            return None                      # لینک دعوت خصوصی
+        s = part
+    s = s.lstrip("@")
+    if _re.fullmatch(r"-?\d+", s):
+        n = normalize_group_id(int(s))
+        return n or None
+    return s if _USERNAME_RE.match(s) else None
+
+
+def fmt_group(ref) -> str:
+    if not ref:
+        return "تنظیم نشده"
+    return f"@{ref}" if isinstance(ref, str) else str(ref)
+
+
+def get_target_group():
+    """اول تنظیم ربات (دیتابیس)، اگه نبود env. خروجی: str (یوزرنیم) یا int (آیدی) یا 0."""
+    v = get_setting("target_group_id", 0)
+    ref = parse_group_ref(v) if v not in (None, "", 0, "0") else None
+    if not ref:
+        ref = parse_group_ref(getattr(Config, "TARGET_GROUP_ID", 0)) or 0
+    return ref
+
+
+get_target_group_id = get_target_group      # سازگاری با کدهای قبلی
+
+
 # ── Account helpers ───────────────────────────────────────────
 def add_account(phone: str, ss: str, pp: int | None = None) -> int:
     sb = _get_client()

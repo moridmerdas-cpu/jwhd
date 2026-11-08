@@ -9,6 +9,7 @@ from config import Config
 from models import database as db
 from core.engine import instant_view
 from core.pool import POOL
+from core.entity import resolve_group_entity
 
 _VIEW_PAUSED = False
 _ENTITY_CACHE = {}
@@ -59,8 +60,14 @@ class MultiTargetListener:
             w = asyncio.create_task(self._worker(i))
             self.workers.append(w)
 
+        self._warm_task = asyncio.create_task(self._warm_loop())
+
         while self.is_running:
             try:
+                gid = db.get_target_group_id()
+                if gid != self._gid:          # گروه از ربات عوض شده
+                    db.debug_log("group_listener", "group", "CHANGED", f"{self._gid} -> {gid}")
+                    self._gid, self.group_entity, self.client = gid, None, None
                 await self._ensure_client()
                 await self._poll()
             except Exception as e:
@@ -274,19 +281,22 @@ class GroupListener:
         self.client        = None
         self.group_entity  = None
         self.last_msg_id   = 0
+        self._gid          = 0
+        self._warm_task    = None
         self.queue         = asyncio.Queue(maxsize=5000)
         self.workers: list = []
 
     # ───────────────── entry ─────────────────
     async def start(self):
-        if not Config.TARGET_GROUP_ID:
+        self._gid = db.get_target_group_id()
+        if not self._gid:
             db.debug_log("group_listener", "start", "SKIP",
-                         "TARGET_GROUP_ID تنظیم نشده")
+                         "گروه هدف تنظیم نشده")
             return
 
         self.is_running = True
         db.debug_log("group_listener", "start", "OK",
-                     f"group={Config.TARGET_GROUP_ID} | workers={self.num_workers}")
+                     f"group={self._gid} | workers={self.num_workers}")
 
         if not POOL._initialized:
             await POOL.init()
@@ -307,6 +317,34 @@ class GroupListener:
                 continue
             await asyncio.sleep(self.POLL_INTERVAL)
 
+    # ───────────────── warm entity cache ─────────────────
+    async def _warm_loop(self):
+        """entity گروه رو برای اکانت‌های شیفت فعال و بعدی از قبل کش می‌کنه تا ویو تأخیر نخوره."""
+        sem = asyncio.Semaphore(5)
+
+        async def warm(phone):
+            key = (phone, str(self._gid))
+            if key in _GROUP_ENTITY_CACHE:
+                return
+            async with sem:
+                try:
+                    c = POOL.clients.get(phone)
+                    if c is None or not c.is_connected():
+                        return
+                    _GROUP_ENTITY_CACHE[key] = await resolve_group_entity(c, self._gid, timeout=20)
+                except Exception as e:
+                    db.debug_log("group_listener", "warm", "WARN",
+                                 f"{phone}: {type(e).__name__}: {str(e)[:80]}")
+
+        while self.is_running:
+            try:
+                nxt = (POOL.active_shift % 4) + 1
+                phones = list(POOL.shifts.get(POOL.active_shift, [])) + list(POOL.shifts.get(nxt, []))
+                await asyncio.gather(*(warm(p) for p in phones), return_exceptions=True)
+            except Exception as e:
+                db.debug_log("group_listener", "warm", "ERROR", f"{type(e).__name__}: {e}")
+            await asyncio.sleep(20)
+
     # ───────────────── ensure client ─────────────────
     async def _ensure_client(self):
         if self.client is not None and self.client.is_connected():
@@ -321,8 +359,7 @@ class GroupListener:
         if self.client is None:
             raise RuntimeError("no healthy account for group listener")
 
-        self.group_entity = await asyncio.wait_for(
-            self.client.get_entity(Config.TARGET_GROUP_ID), timeout=15)
+        self.group_entity = await resolve_group_entity(self.client, self._gid)
 
         msgs = await self.client.get_messages(self.group_entity, limit=1)
         if msgs:
@@ -413,12 +450,11 @@ class GroupListener:
                     if c is None:
                         return ("NO_CLI", phone)
 
-                key = (phone, str(Config.TARGET_GROUP_ID))
+                key = (phone, str(self._gid))
                 ent = _GROUP_ENTITY_CACHE.get(key)
                 if ent is None:
                     try:
-                        ent = await asyncio.wait_for(
-                            c.get_entity(Config.TARGET_GROUP_ID), timeout=10)
+                        ent = await resolve_group_entity(c, self._gid, timeout=8)
                         _GROUP_ENTITY_CACHE[key] = ent
                     except Exception as e:
                         return (f"ENT:{type(e).__name__}", phone)
@@ -492,5 +528,7 @@ class GroupListener:
     # ───────────────── stop ─────────────────
     async def stop(self):
         self.is_running = False
+        if self._warm_task:
+            self._warm_task.cancel()
         for w in self.workers:
             w.cancel()

@@ -65,8 +65,9 @@ def _normalize_phone(raw: str) -> str | None:
     return s
 
 
-def _get_group_id() -> int:
-    return int(db.get_setting("target_group_id", 0) or 0)
+def _get_group_id():
+    """یوزرنیم (str) یا آیدی عددی (int) یا 0"""
+    return db.get_target_group()
 
 
 # ─────────────────────────────────────────────────────────
@@ -86,7 +87,7 @@ async def cmd_start(msg: types.Message):
         f"🤖 این ربات سین‌زن حرفه‌ای شماست\n\n"
         f"📊 وضعیت سریع:\n"
         f"  👥 اکانت: <b>{total}</b>\n"
-        f"  🎯 گروه: <code>{group_id or 'تنظیم نشده'}</code>\n"
+        f"  🎯 گروه: <code>{db.fmt_group(group_id)}</code>\n"
         f"  ⏰ چرخش: هر {mn}-{mx} دقیقه\n\n"
         f"👇 از منو انتخاب کنید:",
         reply_markup=main_menu(),
@@ -241,7 +242,7 @@ async def show_group(msg: types.Message):
     await msg.answer(
         f"🎯 <b>گروه هدف</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"🆔 آیدی: <code>{group_id or 'تنظیم نشده'}</code>\n\n"
+        f"🆔 آیدی: <code>{db.fmt_group(group_id)}</code>\n\n"
         f"👇 گزینه مورد نظر:",
         reply_markup=group_menu(),
         parse_mode="HTML",
@@ -252,9 +253,12 @@ async def show_group(msg: types.Message):
 async def cb_group_set(cb: types.CallbackQuery, state: FSMContext):
     await cb.message.edit_text(
         "🎯 <b>تنظیم گروه هدف</b>\n\n"
-        "آیدی گروه رو بفرست:\n"
+        "یوزرنیم یا لینک گروه رو بفرست (پیشنهادی):\n"
+        "<code>@mygroup</code>\n"
+        "<code>https://t.me/mygroup</code>\n\n"
+        "یا آیدی عددی:\n"
         "<code>-1001234567890</code>\n\n"
-        "💡 آیدی گروه معمولاً منفی و با -100 شروع می‌شه",
+        "💡 فقط گروه/کانال <b>عمومی</b> یوزرنیم داره. لینک دعوت خصوصی (t.me/+...) پشتیبانی نمیشه.",
         reply_markup=cancel_menu(),
         parse_mode="HTML",
     )
@@ -265,20 +269,42 @@ async def cb_group_set(cb: types.CallbackQuery, state: FSMContext):
 @router.message(StateFilter(SetGroup.waiting_id))
 async def set_group_id(msg: types.Message, state: FSMContext):
     if not await guard(msg): return
-    raw = msg.text.strip()
-    try:
-        gid = int(raw)
-    except ValueError:
-        await msg.answer("❌ آیدی اشتباه. باید عدد باشه مثل: <code>-1001234567890</code>", parse_mode="HTML")
+    raw = (msg.text or "").strip()
+    ref = db.parse_group_ref(raw)
+    if not ref:
+        if "joinchat" in raw or "t.me/+" in raw:
+            await msg.answer("❌ لینک دعوت خصوصی پشتیبانی نمیشه. یوزرنیم عمومی (<code>@mygroup</code>) یا آیدی عددی بفرست.",
+                             parse_mode="HTML")
+        else:
+            await msg.answer("❌ فرمت اشتباه. مثال: <code>@mygroup</code> یا <code>https://t.me/mygroup</code> یا <code>-1001234567890</code>",
+                             parse_mode="HTML")
         return
-    db.set_setting("target_group_id", gid)
-    await msg.answer(
-        f"✅ گروه هدف تنظیم شد!\n"
-        f"🆔 <code>{gid}</code>\n\n"
-        f"⚠️ ربات رو ریستارت کن تا تغییر اعمال بشه.",
-        reply_markup=main_menu(),
-        parse_mode="HTML",
-    )
+
+    db.set_setting("target_group_id", ref)
+    text = (f"✅ گروه هدف تنظیم شد!\n🆔 <code>{db.fmt_group(ref)}</code>\n")
+    if isinstance(ref, int) and raw.lstrip("-").isdigit() and int(raw) != ref:
+        text += f"🔧 منفی/پیشوند اصلاح شد: <code>{raw}</code> ← <code>{ref}</code>\n"
+
+    # اعتبارسنجی فوری با یکی از اکانت‌های وصل
+    try:
+        from core.pool import POOL
+        from core.entity import resolve_group_entity
+        from telethon.tl.types import User
+        client = next((c for c in POOL.clients.values() if c.is_connected()), None)
+        if client is None:
+            text += "\n⚠️ هنوز اکانتی وصل نیست، تأیید نشد."
+        else:
+            ent = await resolve_group_entity(client, ref, timeout=15)
+            if isinstance(ent, User):
+                text += "\n⚠️ این یوزرنیم مال یه <b>کاربره</b>، نه گروه!"
+            else:
+                text += f"\n🔎 تأیید شد: <b>{getattr(ent, 'title', '?')}</b>"
+                text += "\n💡 اکانت‌ها باید عضو گروه باشن: «عضویت همه اکانت‌ها» رو بزن."
+    except Exception as e:
+        text += f"\n⚠️ ذخیره شد ولی گروه پیدا نشد:\n<code>{str(e)[:150]}</code>"
+
+    await msg.answer(text + "\n\n✅ لیسنر خودش گروه جدید رو برمی‌داره.",
+                     reply_markup=main_menu(), parse_mode="HTML")
     await state.clear()
 
 
@@ -296,7 +322,7 @@ async def cb_group(cb: types.CallbackQuery):
         asyncio.create_task(_check_group_join_task(cb, group_id))
 
     elif data == "info":
-        await cb.answer(f"🎯 گروه: {group_id}", show_alert=True)
+        await cb.answer(f"🎯 گروه: {db.fmt_group(group_id)}", show_alert=True)
 
     try:
         await cb.answer()
@@ -304,55 +330,58 @@ async def cb_group(cb: types.CallbackQuery):
         pass
 
 
-async def _join_group_all_task(cb: types.CallbackQuery, group_id: int):
+async def _group_members_task(cb: types.CallbackQuery, group_id, mode: str):
+    """mode='join' عضو می‌کنه، mode='check' فقط عضویت رو چک می‌کنه. دلیل شکست‌ها رو گزارش می‌ده."""
     if not group_id:
         await cb.message.answer("❌ گروه هدف تنظیم نشده")
         return
+    from collections import Counter
+    from core.engine import make_client
+    from core.entity import resolve_group_entity
+    from telethon.tl.functions.channels import JoinChannelRequest, GetParticipantRequest
     try:
-        from core.engine import make_client
         accounts = db.get_all_accounts()
-        joined   = 0
+        ok, reasons = 0, Counter()
         for a in accounts:
+            c = None
             try:
-                ss = db.get_session(a["phone"])
-                c  = make_client(ss, phone=a["phone"])
+                c = make_client(db.get_session(a["phone"]), phone=a["phone"])
                 await asyncio.wait_for(c.connect(), timeout=15)
-                entity = await c.get_entity(group_id)
-                from telethon.tl.functions.channels import JoinChannelRequest
-                await c(JoinChannelRequest(entity))
-                joined += 1
-                await c.disconnect()
-                await asyncio.sleep(2)
-            except Exception:
-                pass
-        await cb.message.answer(f"✅ {joined}/{len(accounts)} اکانت عضو گروه شدن")
+                entity = await resolve_group_entity(c, group_id, timeout=15)
+                if mode == "join":
+                    await c(JoinChannelRequest(entity))
+                else:
+                    await c(GetParticipantRequest(channel=entity, participant="me"))
+                ok += 1
+                if mode == "join":
+                    await asyncio.sleep(2)
+            except Exception as e:
+                msg_ = str(e).lower()
+                if mode == "join" and ("already" in msg_ or "participant" in msg_):
+                    ok += 1
+                else:
+                    reasons[f"{type(e).__name__}: {str(e)[:70]}"] += 1
+            finally:
+                if c is not None:
+                    try:
+                        await c.disconnect()
+                    except Exception:
+                        pass
+        label = "عضو گروه شدن" if mode == "join" else "عضو گروه"
+        text = f"✅ {ok}/{len(accounts)} اکانت {label}"
+        for reason, n in reasons.most_common(4):
+            text += f"\n🔴 {n}× <code>{reason}</code>"
+        await cb.message.answer(text, parse_mode="HTML")
     except Exception as e:
         await cb.message.answer(f"❌ {e}")
 
 
-async def _check_group_join_task(cb: types.CallbackQuery, group_id: int):
-    if not group_id:
-        await cb.message.answer("❌ گروه هدف تنظیم نشده")
-        return
-    try:
-        from core.engine import make_client
-        accounts = db.get_all_accounts()
-        joined   = 0
-        for a in accounts:
-            try:
-                ss = db.get_session(a["phone"])
-                c  = make_client(ss, phone=a["phone"])
-                await asyncio.wait_for(c.connect(), timeout=15)
-                entity = await c.get_entity(group_id)
-                from telethon.tl.functions.channels import GetParticipantRequest
-                await c(GetParticipantRequest(channel=entity, participant="me"))
-                joined += 1
-                await c.disconnect()
-            except Exception:
-                pass
-        await cb.message.answer(f"✅ {joined}/{len(accounts)} عضو گروه")
-    except Exception as e:
-        await cb.message.answer(f"❌ {e}")
+async def _join_group_all_task(cb: types.CallbackQuery, group_id):
+    await _group_members_task(cb, group_id, "join")
+
+
+async def _check_group_join_task(cb: types.CallbackQuery, group_id):
+    await _group_members_task(cb, group_id, "check")
 
 
 # ─────────────────────────────────────────────────────────
@@ -725,13 +754,14 @@ async def _join_group(client):
     if not group_id:
         return
     try:
-        entity = await client.get_entity(group_id)
+        from core.entity import resolve_group_entity
+        entity = await resolve_group_entity(client, group_id, timeout=15)
         from telethon.tl.functions.channels import JoinChannelRequest
         await client(JoinChannelRequest(entity))
     except Exception as e:
         err = str(e).lower()
         if "already" not in err and "participant" not in err:
-            db.debug_log("handlers", "join_group", "WARN", f"{type(e).__name__}")
+            db.debug_log("handlers", "join_group", "WARN", f"{type(e).__name__}: {str(e)[:100]}")
 
 
 @router.message(F.text.in_({"➕ افزودن اکانت", "➕ افزودن", "➕ افزودن جدید"}))
@@ -744,7 +774,7 @@ async def add_account_start(msg: types.Message, state: FSMContext):
         "━━━━━━━━━━━━━━━━━━━━━━\n\n"
         "شماره رو با فرمت بین‌المللی بفرست:\n"
         "<code>+989123456789</code>\n\n"
-        f"💡 اکانت خودکار عضو گروه می‌شه: <code>{group_id or 'تنظیم نشده'}</code>",
+        f"💡 اکانت خودکار عضو گروه می‌شه: <code>{db.fmt_group(group_id)}</code>",
         reply_markup=cancel_menu(),
         parse_mode="HTML",
     )
