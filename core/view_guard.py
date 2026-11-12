@@ -122,6 +122,15 @@ class ViewGuard:
         st.views_today  += 1
         st.seen_msgs.add(msg_id)
         st.seen_times[msg_id] = now
+        # persist counter به db — هر ۱۰ ویو یه بار (atomic enough)
+        total = sum(s.views_today for s in self._state.values())
+        if total % 10 == 0 or st.views_today == 1:
+            try:
+                from models import database as _db
+                _db.set_setting("vg_total_views_today", total)
+                _db.set_setting("vg_counter_date", self._today())
+            except Exception:
+                pass
 
     def on_flood(self, phone: str, seconds: int):
         """flood خورد — cooldown تنظیم کن"""
@@ -144,14 +153,25 @@ class ViewGuard:
     def stats(self) -> dict:
         """آمار کلی برای debug"""
         now = _time.time()
-        flooded   = sum(1 for st in self._state.values() if st.flood_until > now)
-        exhausted = sum(1 for st in self._state.values() if st.views_today >= MAX_VIEWS_PER_DAY)
-        total_views = sum(st.views_today for st in self._state.values())
+        flooded     = sum(1 for st in self._state.values() if st.flood_until > now)
+        exhausted   = sum(1 for st in self._state.values() if st.views_today >= MAX_VIEWS_PER_DAY)
+        mem_views   = sum(st.views_today for st in self._state.values())
+
+        # اگه in-memory خالیه (بعد از ری‌استارت)، از db بخون
+        if mem_views == 0:
+            try:
+                from models import database as _db
+                saved_date = _db.get_setting("vg_counter_date", "")
+                if saved_date == self._today():
+                    mem_views = int(_db.get_setting("vg_total_views_today", 0))
+            except Exception:
+                pass
+
         return {
-            "total_accounts": len(self._state),
-            "flooded_now":    flooded,
-            "exhausted_today": exhausted,
-            "total_views_today": total_views,
+            "total_accounts":    len(self._state),
+            "flooded_now":       flooded,
+            "exhausted_today":   exhausted,
+            "total_views_today": mem_views,
         }
 
 
