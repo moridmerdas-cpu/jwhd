@@ -51,8 +51,8 @@ class MultiTargetListener:
             await POOL.init()
 
         try:
-            from core.scheduler import AccountScheduler
-            s = AccountScheduler()
+            from core.scheduler import get_scheduler_instance
+            s = get_scheduler_instance()
             s.start()
             self._scheduler = s
         except Exception as e:

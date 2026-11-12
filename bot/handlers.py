@@ -649,15 +649,19 @@ async def cb_shift_select(cb: types.CallbackQuery):
 async def manual_rotate(msg: types.Message):
     if not await guard(msg): return
     try:
-        from core.scheduler import AccountScheduler
-        s   = AccountScheduler()
+        from core.scheduler import get_scheduler_instance, _STATE
+        s   = get_scheduler_instance()
         old = s._current_shift
-        await s.rotate_now()
-        new = s._current_shift
+        new = await s.rotate_now()
+        res = _STATE.get("last_activate_result") or {}
+        connected = res.get("connected", "?")
+        total     = res.get("total", "?")
         await msg.answer(
             f"🔄 <b>چرخش انجام شد</b>\n\n"
             f"🅰️ شیفت قبلی: <b>{old}</b>\n"
-            f"🅱️ شیفت جدید: <b>{new}</b>",
+            f"🅱️ شیفت جدید: <b>{new}</b>\n"
+            f"🔌 متصل: <b>{connected}/{total}</b>\n"
+            f"📊 کل چرخش‌های موفق: <b>{_STATE.get('total_swap_count', 0)}</b>",
             parse_mode="HTML",
         )
     except Exception as e:
@@ -725,8 +729,9 @@ async def cb_accounts(cb: types.CallbackQuery, state: FSMContext):
         )
 
     elif action == "rotate":
-        from core.scheduler import AccountScheduler
-        await AccountScheduler().rotate_now()
+        from core.scheduler import get_scheduler_instance, _STATE
+        s = get_scheduler_instance()
+        await s.rotate_now()
         await cb.answer("🔄 چرخش انجام شد", show_alert=True)
         await cb.message.edit_text(_status_text(), reply_markup=status_menu(), parse_mode="HTML")
 
@@ -816,12 +821,20 @@ async def cb_stats(cb: types.CallbackQuery):
         )
 
     elif data == "shift":
-        from core.scheduler import AccountScheduler, _STATE
+        from core.scheduler import get_scheduler_instance, _STATE
         from core.pool import POOL
-        cur = POOL.active_shift
+        cur    = POOL.active_shift
         nxt_dt = _STATE.get("next_swap_at")
-        nxt = nxt_dt.strftime("%H:%M:%S") if nxt_dt else "?"
-        last_iv = _STATE.get("last_interval", 0)
+        nxt    = nxt_dt.strftime("%H:%M:%S") if nxt_dt else "?"
+        last_iv     = _STATE.get("last_interval", 0)
+        total_swaps = _STATE.get("total_swap_count", 0)
+        auto_swaps  = _STATE.get("swap_count", 0)
+        manual_swaps = _STATE.get("manual_swap_count", 0)
+        last_swap_at = _STATE.get("last_swap_at") or "هنوز نشده"
+        res         = _STATE.get("last_activate_result") or {}
+        connected   = res.get("connected", "?")
+        total_acc   = res.get("total", "?")
+        act_at      = res.get("at", "?")
         mn = int(db.get_setting("shift_min_sec", Config.SHIFT_MIN_SEC)) // 60
         mx = int(db.get_setting("shift_max_sec", Config.SHIFT_MAX_SEC)) // 60
         await cb.message.edit_text(
@@ -829,7 +842,14 @@ async def cb_stats(cb: types.CallbackQuery):
             f"🟢 شیفت فعال: <b>{cur}</b>\n"
             f"⏰ swap بعدی: <b>{nxt}</b>\n"
             f"⏱️ آخرین بازه: <b>{last_iv}s</b>\n"
-            f"📊 تنظیم فعلی: <b>{mn}-{mx} دقیقه</b>",
+            f"📊 تنظیم فعلی: <b>{mn}-{mx} دقیقه</b>\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"✅ <b>چرخش‌های موفق</b>\n"
+            f"  🔁 کل: <b>{total_swaps}</b>\n"
+            f"  🤖 خودکار: <b>{auto_swaps}</b>\n"
+            f"  🖐 دستی: <b>{manual_swaps}</b>\n"
+            f"  🕐 آخرین چرخش: <b>{last_swap_at}</b>\n\n"
+            f"🔌 <b>آخرین activate</b>: <b>{connected}/{total_acc}</b> متصل (ساعت {act_at})",
             reply_markup=stats_menu(), parse_mode="HTML",
         )
 
