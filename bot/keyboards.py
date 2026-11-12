@@ -62,8 +62,9 @@ def accounts_list_kb(accounts: list, page: int = 0, per_page: int = 10) -> Inlin
     for a in accounts[s:e]:
         icon = {"online": "🟢", "flood": "🟡", "error": "🔴",
                 "idle": "💤", "dead": "⚫"}.get(a.get("status", "idle"), "⚪")
-        shift_map  = {"1": "1️⃣", "2": "2️⃣", "3": "3️⃣", "4": "4️⃣"}
-        shift_icon = shift_map.get(str(a.get("shift", "1")), "🔢")
+        _SHIFT_EMOJIS = ["1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"]
+        sh = int(a.get("shift") or 1) - 1
+        shift_icon = _SHIFT_EMOJIS[sh] if 0 <= sh < len(_SHIFT_EMOJIS) else "🔢"
         b.button(text=f"{icon} {shift_icon} {a['phone']}",
                  callback_data=f"acc:info:{a['id']}")
     b.adjust(1)
@@ -96,11 +97,25 @@ def stats_menu() -> InlineKeyboardMarkup:
 
 def settings_menu() -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
-    b.button(text="⏱️ بازه تایم شیفت",   callback_data="set:shift_timing")
-    b.button(text="🔢 انتخاب شیفت فعال", callback_data="set:shift_active")
-    b.button(text="🛡️ وضعیت نگهبان",     callback_data="set:guardian")
-    b.button(text="💾 بکاپ",              callback_data="set:backup")
-    b.button(text="🔙 برگشت",             callback_data="menu:main")
+    b.button(text="⏱️ بازه تایم شیفت",    callback_data="set:shift_timing")
+    b.button(text="🔢 انتخاب شیفت فعال",  callback_data="set:shift_active")
+    b.button(text="🔢 تعداد شیفت‌ها",      callback_data="set:num_shifts")
+    b.button(text="🛡️ وضعیت نگهبان",      callback_data="set:guardian")
+    b.button(text="💾 بکاپ",               callback_data="set:backup")
+    b.button(text="🔒 تنظیمات ضد لیمیت",  callback_data="set:viewguard")
+    b.button(text="🔙 برگشت",              callback_data="menu:main")
+    b.adjust(2)
+    return b.as_markup()
+
+
+def viewguard_menu() -> InlineKeyboardMarkup:
+    """منوی تنظیمات ViewGuard"""
+    b = InlineKeyboardBuilder()
+    b.button(text="📊 آمار لحظه‌ای",      callback_data="vg:stats")
+    b.button(text="🔄 ریست آمار امروز",   callback_data="vg:reset")
+    b.button(text="⚙️ تنظیم سهمیه روزانه", callback_data="vg:set_daily")
+    b.button(text="⏳ تنظیم فاصله ویو",   callback_data="vg:set_gap")
+    b.button(text="🔙 برگشت",             callback_data="menu:settings")
     b.adjust(2)
     return b.as_markup()
 
@@ -137,13 +152,18 @@ def shift_timing_menu() -> InlineKeyboardMarkup:
     return b.as_markup()
 
 
-def shift_select_menu(current: int) -> InlineKeyboardMarkup:
-    """منوی انتخاب شیفت فعال (۱ تا ۴) + حالت همه شیفت‌ها (0)"""
+def shift_select_menu(current: int, num_shifts: int = 0) -> InlineKeyboardMarkup:
+    """منوی انتخاب شیفت فعال (داینامیک) + حالت همه شیفت‌ها (0)"""
+    if num_shifts <= 0:
+        try:
+            from core.pool import POOL
+            num_shifts = POOL.num_shifts
+        except Exception:
+            num_shifts = 4
     b = InlineKeyboardBuilder()
-    for i in range(1, 5):
+    for i in range(1, num_shifts + 1):
         mark = "✅ " if i == current else ""
         b.button(text=f"{mark}شیفت {i}", callback_data=f"shift:select:{i}")
-    # دکمه همه شیفت‌ها
     all_mark = "✅ " if current == 0 else ""
     b.button(text=f"{all_mark}🌐 همه شیفت‌ها", callback_data="shift:select:0")
     b.button(text="🔙 برگشت", callback_data="menu:main")

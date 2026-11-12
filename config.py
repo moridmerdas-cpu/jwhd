@@ -42,6 +42,9 @@ class Config:
     # ── تارگت ─────────────────────────────────────────────────
     TARGET_GROUP_ID    = _get_int("TARGET_GROUP_ID", 0)
 
+    # ── تعداد شیفت‌ها (قابل تغییر از ربات) ───────────────────
+    NUM_SHIFTS: int    = _get_int("NUM_SHIFTS", 4)   # پیش‌فرض ۴ شیفت
+
     AUTO_VIEW_ENABLED  = _get_int("AUTO_VIEW_ENABLED", 1) == 1
     AUTO_VIEW_DELAY_MS = _get_int("AUTO_VIEW_DELAY_MS", 0)
 

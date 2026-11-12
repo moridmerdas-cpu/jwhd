@@ -466,7 +466,8 @@ async def cb_settings(cb: types.CallbackQuery, state: FSMContext):
         await cb.message.edit_text(
             f"🔢 <b>انتخاب شیفت فعال</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"شیفت فعلی: <b>{active_label}</b>\n\n"
+            f"شیفت فعلی: <b>{active_label}</b>\n"
+            f"تعداد شیفت‌ها: <b>{POOL.num_shifts}</b>\n\n"
             f"👇 شیفت مورد نظر رو انتخاب کن:",
             reply_markup=shift_select_menu(active),
             parse_mode="HTML",
@@ -742,19 +743,23 @@ async def cb_stats(cb: types.CallbackQuery):
         accounts = db.get_all_accounts()
         counts   = db.count_by_status()
         from core.pool import POOL
+        _SHIFT_EMOJIS = ["1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"]
         active_lbl = "🌐 همه شیفت‌ها" if POOL.active_shift == 0 else f"شیفت {POOL.active_shift}"
+        shift_lines = "\n".join(
+            f"{_SHIFT_EMOJIS[i-1] if i <= len(_SHIFT_EMOJIS) else '🔢'} شیفت {i}: "
+            f"<b>{sum(1 for a in accounts if str(a.get('shift','')) == str(i))}</b>"
+            for i in range(1, POOL.num_shifts + 1)
+        )
         await cb.message.edit_text(
             f"📊 <b>آمار کلی</b>\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
             f"🔢 شیفت فعال: <b>{active_lbl}</b>\n"
+            f"📋 تعداد شیفت‌ها: <b>{POOL.num_shifts}</b>\n"
             f"👥 کل اکانت: <b>{len(accounts)}</b>\n"
             f"🟢 آنلاین: <b>{counts.get('online', 0)}</b>\n"
             f"💤 استراحت: <b>{counts.get('idle', 0)}</b>\n"
             f"🟡 Flood: <b>{counts.get('flood', 0)}</b>\n"
             f"🔴 خطا: <b>{counts.get('error', 0)}</b>\n\n"
-            f"1️⃣ شیفت 1: <b>{sum(1 for a in accounts if a['shift']=='1')}</b>\n"
-            f"2️⃣ شیفت 2: <b>{sum(1 for a in accounts if a['shift']=='2')}</b>\n"
-            f"3️⃣ شیفت 3: <b>{sum(1 for a in accounts if a['shift']=='3')}</b>\n"
-            f"4️⃣ شیفت 4: <b>{sum(1 for a in accounts if a['shift']=='4')}</b>",
+            f"{shift_lines}",
             reply_markup=stats_menu(), parse_mode="HTML",
         )
 

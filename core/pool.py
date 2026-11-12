@@ -29,7 +29,8 @@ class ClientPool:
     def __init__(self):
         self.clients = {}
         self.all_phones = []
-        self.shifts = {1: [], 2: [], 3: [], 4: []}
+        self.num_shifts = self._load_num_shifts()
+        self.shifts = {i: [] for i in range(1, self.num_shifts + 1)}
         self.active_shift = 1   # 0 = همه شیفت‌ها با هم
         self.lock = asyncio.Lock()
         self._initialized = False
@@ -39,6 +40,45 @@ class ClientPool:
         self._bg = set()
         self.ready = asyncio.Event()    # بعد از پایان init ست میشه
 
+    @staticmethod
+    def _load_num_shifts() -> int:
+        try:
+            v = int(db.get_setting("num_shifts", 0) or 0)
+            if 1 <= v <= 20:
+                return v
+        except Exception:
+            pass
+        from config import Config
+        n = getattr(Config, "NUM_SHIFTS", 4)
+        return max(1, min(n, 20))
+
+    def set_num_shifts(self, n: int):
+        """تعداد شیفت‌ها رو تغییر میده و pool رو rebuild میکنه."""
+        n = max(1, min(n, 20))
+        self.num_shifts = n
+        db.set_setting("num_shifts", n)
+        # buckets جدید بساز — اکانت‌های اضافه رو به کم‌جمعیت‌ترین شیفت بده
+        new_buckets = {i: [] for i in range(1, n + 1)}
+        for phone in self.all_phones:
+            # پیدا کردن شیفت قبلی از self.shifts
+            old_shift = None
+            for sh, phones in self.shifts.items():
+                if phone in phones:
+                    old_shift = sh
+                    break
+            if old_shift and old_shift <= n:
+                new_buckets[old_shift].append(phone)
+            else:
+                # اکانت‌های بیرون از بازه → کم‌جمعیت‌ترین
+                k = min(new_buckets, key=lambda x: len(new_buckets[x]))
+                new_buckets[k].append(phone)
+                db.update_account_shift(phone, str(k))
+        self.shifts = new_buckets
+        # active_shift رو اصلاح کن اگه از محدوده خارج شد
+        if self.active_shift not in (0, *range(1, n + 1)):
+            self.active_shift = 1
+            db.set_setting("active_shift", 1)
+
     async def init(self):
         if self._initialized:
             return
@@ -47,17 +87,19 @@ class ClientPool:
                 return
             self._initialized = True
 
+            self.num_shifts = self._load_num_shifts()
             accounts = db.get_all_accounts()
             # ═══ Skip dead accounts ═══
             accounts = [a for a in accounts if a.get("status") != "dead"]
             if not accounts:
                 return
 
-            # شیفت‌ها از ستون shift دیتابیس خونده میشن تا لیست اکانت‌ها با pool یکی باشه
-            buckets = {1: [], 2: [], 3: [], 4: []}
+            # شیفت‌ها از ستون shift دیتابیس خونده میشن
+            valid = set(str(i) for i in range(1, self.num_shifts + 1))
+            buckets = {i: [] for i in range(1, self.num_shifts + 1)}
             for a in accounts:
                 sh = str(a.get("shift") or "")
-                if sh in ("1", "2", "3", "4"):
+                if sh in valid:
                     buckets[int(sh)].append(a["phone"])
             for a in accounts:
                 if not any(a["phone"] in v for v in buckets.values()):
@@ -70,13 +112,14 @@ class ClientPool:
             self.all_phones = phones
             try:
                 self.active_shift = int(db.get_setting("active_shift", 1) or 1)
-                if self.active_shift not in (0, 1, 2, 3, 4):
+                if self.active_shift not in (0, *range(1, self.num_shifts + 1)):
                     self.active_shift = 1
             except Exception:
                 self.active_shift = 1
 
             db.debug_log("pool", "init", "OK",
-                         f"total:{n} " + " ".join(f"S{k}:{len(v)}" for k, v in self.shifts.items()))
+                         f"total:{n} shifts:{self.num_shifts} " +
+                         " ".join(f"S{k}:{len(v)}" for k, v in self.shifts.items()))
 
             # اتصال موازی همه
             sem = asyncio.Semaphore(20)
@@ -178,7 +221,7 @@ class ClientPool:
         """چرخش شیفت — اگه حالت همه شیفت‌ها (0) فعاله، چرخش نمیشه."""
         if self.active_shift == 0:
             return 0   # حالت all-shifts: scheduler دست نمیزنه
-        self.active_shift = (self.active_shift % 4) + 1
+        self.active_shift = (self.active_shift % self.num_shifts) + 1
         self.request_status_sync()
         return self.active_shift
 

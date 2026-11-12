@@ -162,7 +162,13 @@ def add_account(phone: str, ss: str, pp: int | None = None) -> int:
     sb = _get_client()
     count_res = sb.table("accounts").select("id", count="exact").execute()
     count = count_res.count or 0
-    shift = str((count % 4) + 1)   # شیفت عددی 1-4 هماهنگ با pool.py
+    # تعداد شیفت‌ها رو از db بخون (پیش‌فرض ۴)
+    try:
+        _ns = int(get_setting("num_shifts", 4) or 4)
+        _ns = max(1, min(_ns, 20))
+    except Exception:
+        _ns = 4
+    shift = str((count % _ns) + 1)
     res = sb.table("accounts").insert({
         "phone":             phone,
         "session_encrypted": encrypt(ss),
