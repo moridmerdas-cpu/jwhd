@@ -7,7 +7,6 @@ from pathlib import Path
 from aiogram import types, Router, F, Bot
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import StatesGroup, State
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.errors import SessionPasswordNeededError
@@ -19,7 +18,6 @@ from bot.keyboards import (
     main_menu, status_menu, accounts_menu, accounts_list_kb,
     stats_menu, settings_menu, group_menu, confirm_menu,
     cancel_menu, view_toggle_menu, shift_select_menu, shift_timing_menu,
-    viewguard_menu,
 )
 from bot.states import AddAccount, SetShiftTiming, SetGroup
 
@@ -46,8 +44,30 @@ async def guard(msg: types.Message) -> bool:
 guard_admin = guard
 
 
-def _get_group_id() -> int:
-    return int(db.get_setting("target_group_id", 0) or 0)
+_FA_DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
+
+
+def _normalize_phone(raw: str) -> str | None:
+    """ارقام فارسی/عربی، فاصله، خط تیره و پیشوندهای 09xx / 98xx / 00xx رو به +E.164 تبدیل می‌کنه."""
+    s = raw.translate(_FA_DIGITS)
+    s = "".join(ch for ch in s if ch.isdigit() or ch == "+")
+    if s.startswith("00"):
+        s = "+" + s[2:]
+    elif s.startswith("09") and len(s) == 11:
+        s = "+98" + s[1:]
+    elif s.startswith("98") and len(s) == 12:
+        s = "+" + s
+    elif not s.startswith("+") and s.isdigit() and len(s) >= 10:
+        s = "+" + s
+    digits = s[1:]
+    if not s.startswith("+") or not digits.isdigit() or not (10 <= len(digits) <= 15):
+        return None
+    return s
+
+
+def _get_group_id():
+    """یوزرنیم (str) یا آیدی عددی (int) یا 0"""
+    return db.get_target_group()
 
 
 # ─────────────────────────────────────────────────────────
@@ -67,7 +87,7 @@ async def cmd_start(msg: types.Message):
         f"🤖 این ربات سین‌زن حرفه‌ای شماست\n\n"
         f"📊 وضعیت سریع:\n"
         f"  👥 اکانت: <b>{total}</b>\n"
-        f"  🎯 گروه: <code>{group_id or 'تنظیم نشده'}</code>\n"
+        f"  🎯 گروه: <code>{db.fmt_group(group_id)}</code>\n"
         f"  ⏰ چرخش: هر {mn}-{mx} دقیقه\n\n"
         f"👇 از منو انتخاب کنید:",
         reply_markup=main_menu(),
@@ -222,7 +242,7 @@ async def show_group(msg: types.Message):
     await msg.answer(
         f"🎯 <b>گروه هدف</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"🆔 آیدی: <code>{group_id or 'تنظیم نشده'}</code>\n\n"
+        f"🆔 آیدی: <code>{db.fmt_group(group_id)}</code>\n\n"
         f"👇 گزینه مورد نظر:",
         reply_markup=group_menu(),
         parse_mode="HTML",
@@ -233,9 +253,12 @@ async def show_group(msg: types.Message):
 async def cb_group_set(cb: types.CallbackQuery, state: FSMContext):
     await cb.message.edit_text(
         "🎯 <b>تنظیم گروه هدف</b>\n\n"
-        "آیدی گروه رو بفرست:\n"
+        "یوزرنیم یا لینک گروه رو بفرست (پیشنهادی):\n"
+        "<code>@mygroup</code>\n"
+        "<code>https://t.me/mygroup</code>\n\n"
+        "یا آیدی عددی:\n"
         "<code>-1001234567890</code>\n\n"
-        "💡 آیدی گروه معمولاً منفی و با -100 شروع می‌شه",
+        "💡 فقط گروه/کانال <b>عمومی</b> یوزرنیم داره. لینک دعوت خصوصی (t.me/+...) پشتیبانی نمیشه.",
         reply_markup=cancel_menu(),
         parse_mode="HTML",
     )
@@ -246,20 +269,48 @@ async def cb_group_set(cb: types.CallbackQuery, state: FSMContext):
 @router.message(StateFilter(SetGroup.waiting_id))
 async def set_group_id(msg: types.Message, state: FSMContext):
     if not await guard(msg): return
-    raw = msg.text.strip()
-    try:
-        gid = int(raw)
-    except ValueError:
-        await msg.answer("❌ آیدی اشتباه. باید عدد باشه مثل: <code>-1001234567890</code>", parse_mode="HTML")
+    raw = (msg.text or "").strip()
+    ref = db.parse_group_ref(raw)
+    if not ref:
+        if "joinchat" in raw or "t.me/+" in raw:
+            await msg.answer("❌ لینک دعوت خصوصی پشتیبانی نمیشه. یوزرنیم عمومی (<code>@mygroup</code>) یا آیدی عددی بفرست.",
+                             parse_mode="HTML")
+        else:
+            await msg.answer("❌ فرمت اشتباه. مثال: <code>@mygroup</code> یا <code>https://t.me/mygroup</code> یا <code>-1001234567890</code>",
+                             parse_mode="HTML")
         return
-    db.set_setting("target_group_id", gid)
-    await msg.answer(
-        f"✅ گروه هدف تنظیم شد!\n"
-        f"🆔 <code>{gid}</code>\n\n"
-        f"⚠️ ربات رو ریستارت کن تا تغییر اعمال بشه.",
-        reply_markup=main_menu(),
-        parse_mode="HTML",
-    )
+
+    db.set_setting("target_group_id", ref)
+    text = (f"✅ گروه هدف تنظیم شد!\n🆔 <code>{db.fmt_group(ref)}</code>\n")
+    if isinstance(ref, int) and raw.lstrip("-").isdigit() and int(raw) != ref:
+        text += f"🔧 منفی/پیشوند اصلاح شد: <code>{raw}</code> ← <code>{ref}</code>\n"
+
+    # اعتبارسنجی فوری با یکی از اکانت‌های وصل
+    try:
+        from core.pool import POOL
+        from core.entity import resolve_group_entity
+        from telethon.tl.types import User
+        client = next((c for c in POOL.clients.values() if c.is_connected()), None)
+        if client is None:
+            text += "\n⚠️ هنوز اکانتی وصل نیست، تأیید نشد."
+        else:
+            ent = await resolve_group_entity(client, ref, timeout=15)
+            if isinstance(ent, User):
+                text += "\n⚠️ این یوزرنیم مال یه <b>کاربره</b>، نه گروه!"
+            else:
+                text += f"\n🔎 تأیید شد: <b>{getattr(ent, 'title', '?')}</b>"
+                text += "\n💡 اکانت‌ها باید عضو گروه باشن: «عضویت همه اکانت‌ها» رو بزن."
+    except Exception as e:
+        text += f"\n⚠️ ذخیره شد ولی گروه پیدا نشد:\n<code>{str(e)[:150]}</code>"
+
+    try:
+        from core.listener import ensure_group_listener
+        gl = await ensure_group_listener()
+        gl._settings_ts = 0.0          # تنظیمات رو سریع دوباره بخونه
+        text += "\n\n✅ لیسنر روشنه و گروه جدید رو برمی‌داره."
+    except Exception as e:
+        text += f"\n\n⚠️ لیسنر روشن نشد: <code>{str(e)[:100]}</code>"
+    await msg.answer(text, reply_markup=main_menu(), parse_mode="HTML")
     await state.clear()
 
 
@@ -277,7 +328,39 @@ async def cb_group(cb: types.CallbackQuery):
         asyncio.create_task(_check_group_join_task(cb, group_id))
 
     elif data == "info":
-        await cb.answer(f"🎯 گروه: {group_id}", show_alert=True)
+        await cb.answer(f"🎯 گروه: {db.fmt_group(group_id)}", show_alert=True)
+
+    elif data == "diag":
+        await cb.answer()
+        from core.listener import get_group_listener, ensure_group_listener
+        gl = get_group_listener()
+        if gl is None or not gl.is_running:
+            if not group_id:
+                await cb.message.answer("❌ گروه هدف تنظیم نشده.")
+                return
+            gl = await ensure_group_listener()
+            await asyncio.sleep(3)
+        await cb.message.answer(gl.diag_text(), parse_mode="HTML")
+
+    elif data == "test":
+        await cb.answer("⏳ تست روی آخرین پیام...")
+        from core.listener import get_group_listener, ensure_group_listener
+        gl = get_group_listener() or await ensure_group_listener()
+        try:
+            txt = await asyncio.wait_for(gl.test_round(), timeout=60)
+        except Exception as e:
+            txt = f"❌ تست شکست خورد:\n<code>{type(e).__name__}: {str(e)[:200]}</code>"
+        await cb.message.answer(txt, parse_mode="HTML")
+
+    elif data == "mode":
+        from core.listener import get_group_listener, _MODES, _MODE_FA
+        cur = db.get_setting("group_action", "both")
+        nxt = _MODES[(_MODES.index(cur) + 1) % len(_MODES)] if cur in _MODES else "both"
+        db.set_setting("group_action", nxt)
+        gl = get_group_listener()
+        if gl:
+            gl.mode = nxt
+        await cb.answer(f"⚙️ عملیات: {_MODE_FA[nxt]}", show_alert=True)
 
     try:
         await cb.answer()
@@ -285,55 +368,58 @@ async def cb_group(cb: types.CallbackQuery):
         pass
 
 
-async def _join_group_all_task(cb: types.CallbackQuery, group_id: int):
+async def _group_members_task(cb: types.CallbackQuery, group_id, mode: str):
+    """mode='join' عضو می‌کنه، mode='check' فقط عضویت رو چک می‌کنه. دلیل شکست‌ها رو گزارش می‌ده."""
     if not group_id:
         await cb.message.answer("❌ گروه هدف تنظیم نشده")
         return
+    from collections import Counter
+    from core.engine import make_client
+    from core.entity import resolve_group_entity
+    from telethon.tl.functions.channels import JoinChannelRequest, GetParticipantRequest
     try:
-        from core.engine import make_client
         accounts = db.get_all_accounts()
-        joined   = 0
+        ok, reasons = 0, Counter()
         for a in accounts:
+            c = None
             try:
-                ss = db.get_session(a["phone"])
-                c  = make_client(ss, phone=a["phone"])
+                c = make_client(db.get_session(a["phone"]), phone=a["phone"])
                 await asyncio.wait_for(c.connect(), timeout=15)
-                entity = await c.get_entity(group_id)
-                from telethon.tl.functions.channels import JoinChannelRequest
-                await c(JoinChannelRequest(entity))
-                joined += 1
-                await c.disconnect()
-                await asyncio.sleep(2)
-            except Exception:
-                pass
-        await cb.message.answer(f"✅ {joined}/{len(accounts)} اکانت عضو گروه شدن")
+                entity = await resolve_group_entity(c, group_id, timeout=15)
+                if mode == "join":
+                    await c(JoinChannelRequest(entity))
+                else:
+                    await c(GetParticipantRequest(channel=entity, participant="me"))
+                ok += 1
+                if mode == "join":
+                    await asyncio.sleep(2)
+            except Exception as e:
+                msg_ = str(e).lower()
+                if mode == "join" and ("already" in msg_ or "participant" in msg_):
+                    ok += 1
+                else:
+                    reasons[f"{type(e).__name__}: {str(e)[:70]}"] += 1
+            finally:
+                if c is not None:
+                    try:
+                        await c.disconnect()
+                    except Exception:
+                        pass
+        label = "عضو گروه شدن" if mode == "join" else "عضو گروه"
+        text = f"✅ {ok}/{len(accounts)} اکانت {label}"
+        for reason, n in reasons.most_common(4):
+            text += f"\n🔴 {n}× <code>{reason}</code>"
+        await cb.message.answer(text, parse_mode="HTML")
     except Exception as e:
         await cb.message.answer(f"❌ {e}")
 
 
-async def _check_group_join_task(cb: types.CallbackQuery, group_id: int):
-    if not group_id:
-        await cb.message.answer("❌ گروه هدف تنظیم نشده")
-        return
-    try:
-        from core.engine import make_client
-        accounts = db.get_all_accounts()
-        joined   = 0
-        for a in accounts:
-            try:
-                ss = db.get_session(a["phone"])
-                c  = make_client(ss, phone=a["phone"])
-                await asyncio.wait_for(c.connect(), timeout=15)
-                entity = await c.get_entity(group_id)
-                from telethon.tl.functions.channels import GetParticipantRequest
-                await c(GetParticipantRequest(channel=entity, participant="me"))
-                joined += 1
-                await c.disconnect()
-            except Exception:
-                pass
-        await cb.message.answer(f"✅ {joined}/{len(accounts)} عضو گروه")
-    except Exception as e:
-        await cb.message.answer(f"❌ {e}")
+async def _join_group_all_task(cb: types.CallbackQuery, group_id):
+    await _group_members_task(cb, group_id, "join")
+
+
+async def _check_group_join_task(cb: types.CallbackQuery, group_id):
+    await _group_members_task(cb, group_id, "check")
 
 
 # ─────────────────────────────────────────────────────────
@@ -346,12 +432,11 @@ async def show_settings(msg: types.Message):
     mx = int(db.get_setting("shift_max_sec", Config.SHIFT_MAX_SEC)) // 60
     from core.pool import POOL
     active = POOL.active_shift
-    active_lbl = "🌐 همه شیفت‌ها" if active == 0 else f"شیفت {active}"
     await msg.answer(
         f"⚙️ <b>تنظیمات</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"⏱️ بازه شیفت: <b>{mn}-{mx} دقیقه</b>\n"
-        f"🔢 شیفت فعال: <b>{active_lbl}</b>\n\n"
+        f"🔢 شیفت فعال: <b>{active}</b>\n\n"
         f"👇 گزینه مورد نظر:",
         reply_markup=settings_menu(),
         parse_mode="HTML",
@@ -377,11 +462,12 @@ async def cb_settings(cb: types.CallbackQuery, state: FSMContext):
     elif data == "shift_active":
         from core.pool import POOL
         active = POOL.active_shift
-        active_lbl = "🌐 همه شیفت‌ها" if active == 0 else f"شیفت {active}"
+        active_label = "🌐 همه شیفت‌ها" if active == 0 else f"شیفت {active}"
         await cb.message.edit_text(
             f"🔢 <b>انتخاب شیفت فعال</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"شیفت فعلی: <b>{active_lbl}</b>\n\n"
+            f"شیفت فعلی: <b>{active_label}</b>\n"
+            f"تعداد شیفت‌ها: <b>{POOL.num_shifts}</b>\n\n"
             f"👇 شیفت مورد نظر رو انتخاب کن:",
             reply_markup=shift_select_menu(active),
             parse_mode="HTML",
@@ -398,38 +484,40 @@ async def cb_settings(cb: types.CallbackQuery, state: FSMContext):
         except Exception as e:
             await cb.answer(f"❌ خطا: {e}", show_alert=True)
 
-    elif data == "viewguard":
-        from core.view_guard import VIEW_GUARD, MAX_VIEWS_PER_DAY, MIN_GAP_SEC, MAX_GAP_SEC
-        st = VIEW_GUARD.stats()
+    elif data == "num_shifts":
+        from core.pool import POOL
+        mn = int(db.get_setting("shift_min_sec", Config.SHIFT_MIN_SEC)) // 60
+        mx = int(db.get_setting("shift_max_sec", Config.SHIFT_MAX_SEC)) // 60
+        shift_lines = "\n".join(
+            f"  شیفت {i}: <b>{len(POOL.shifts.get(i, []))}</b> اکانت"
+            for i in range(1, POOL.num_shifts + 1)
+        )
         await cb.message.edit_text(
-            f"🔒 <b>تنظیمات ضد لیمیت (ViewGuard)</b>\n"
+            f"🔢 <b>تعداد شیفت‌ها</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"📊 <b>آمار لحظه‌ای:</b>\n"
-            f"  👤 اکانت‌های tracked: <b>{st['total_accounts']}</b>\n"
-            f"  🟡 Flood شده: <b>{st['flooded_now']}</b>\n"
-            f"  💤 سهمیه تموم: <b>{st['exhausted_today']}</b>\n"
-            f"  👁 کل ویو امروز: <b>{st['total_views_today']}</b>\n\n"
-            f"⚙️ <b>تنظیمات فعلی:</b>\n"
-            f"  📅 سهمیه روزانه: <b>{MAX_VIEWS_PER_DAY}</b> ویو/اکانت\n"
-            f"  ⏳ فاصله بین ویو: <b>{MIN_GAP_SEC:.0f}–{MAX_GAP_SEC:.0f}</b> ثانیه\n\n"
-            f"💡 این تنظیمات جلوی view_limit تلگرام رو میگیره.",
-            reply_markup=viewguard_menu(),
+            f"📋 شیفت‌های فعال: <b>{POOL.num_shifts}</b>\n"
+            f"⏱️ بازه چرخش: <b>{mn}-{mx} دقیقه</b>\n\n"
+            f"{shift_lines}\n\n"
+            f"💡 برای تغییر تعداد شیفت، اکانت‌ها رو از منوی اکانت‌ها به شیفت‌های مختلف اختصاص بده.",
+            reply_markup=_num_shifts_menu(POOL.num_shifts),
             parse_mode="HTML",
         )
 
-    elif data == "num_shifts":
-        from core.pool import POOL
-        n = POOL.num_shifts
-        await state.set_state(_NSState.waiting)
+    elif data == "viewguard":
+        from bot.keyboards import viewguard_menu
+        # خوندن تنظیمات فعلی ViewGuard از دیتابیس
+        daily_quota  = int(db.get_setting("vg_daily_quota",  200))
+        gap_min      = int(db.get_setting("vg_gap_min_sec",  3))
+        gap_max      = int(db.get_setting("vg_gap_max_sec",  8))
+        today_count  = int(db.get_setting("vg_today_count",  0))
         await cb.message.edit_text(
-            f"🔢 <b>تنظیم تعداد شیفت‌ها</b>\n"
+            f"🔒 <b>تنظیمات ضد لیمیت (ViewGuard)</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"تعداد فعلی: <b>{n} شیفت</b>\n\n"
-            f"عدد جدید رو بفرست (۱ تا ۲۰):\n"
-            f"<i>⚠️ اکانت‌هایی که شیفتشون از محدوده خارج بشن، "
-            f"به کم‌جمعیت‌ترین شیفت منتقل میشن.</i>",
+            f"📊 ویوهای امروز: <b>{today_count}</b> / <b>{daily_quota}</b>\n"
+            f"⏳ فاصله بین ویوها: <b>{gap_min}-{gap_max} ثانیه</b>\n\n"
+            f"👇 گزینه مورد نظر:",
+            reply_markup=viewguard_menu(),
             parse_mode="HTML",
-            reply_markup=cancel_menu(),
         )
 
     try:
@@ -438,6 +526,7 @@ async def cb_settings(cb: types.CallbackQuery, state: FSMContext):
         pass
 
 
+# تنظیم بازه شیفت — پیش‌فرض
 @router.callback_query(F.data.startswith("stm:preset:"))
 async def cb_shift_timing_preset(cb: types.CallbackQuery):
     _, _, mn_str, mx_str = cb.data.split(":")
@@ -457,6 +546,7 @@ async def cb_shift_timing_preset(cb: types.CallbackQuery):
         pass
 
 
+# تنظیم بازه شیفت — دستی
 @router.callback_query(F.data == "stm:custom")
 async def cb_shift_timing_custom(cb: types.CallbackQuery, state: FSMContext):
     await cb.message.edit_text(
@@ -497,33 +587,47 @@ async def set_shift_timing(msg: types.Message, state: FSMContext):
     await state.clear()
 
 
+# انتخاب شیفت فعال
 @router.callback_query(F.data.startswith("shift:select:"))
 async def cb_shift_select(cb: types.CallbackQuery):
     shift = int(cb.data.split(":")[2])
     from core.pool import POOL
     old = POOL.active_shift
-    old_lbl = "همه شیفت‌ها" if old == 0 else f"شیفت {old}"
-    new_lbl = "همه شیفت‌ها" if shift == 0 else f"شیفت {shift}"
+
+    # پیام انتظار
+    old_label = "همه شیفت‌ها" if old == 0 else f"شیفت {old}"
+    new_label  = "همه شیفت‌ها" if shift == 0 else f"شیفت {shift}"
+    await cb.answer(f"⏳ {old_label} → {new_label} | در حال اتصال اکانت‌ها...")
+
     db.set_setting("active_shift", shift)
     try:
-        import asyncio
         rep = await asyncio.wait_for(POOL.activate_shift(shift), timeout=120)
-        connected = rep["connected"]
-        total = rep["total"]
-    except Exception:
-        POOL.active_shift = shift
-        connected, total = 0, 0
-    await cb.answer(f"✅ {old_lbl} → {new_lbl}", show_alert=True)
+    except Exception as e:
+        total = len(POOL.all_phones) if shift == 0 else len(POOL.shifts.get(shift, []))
+        rep = {"total": total, "connected": 0,
+               "errors": {"-": f"{type(e).__name__}: {e}"}}
+
     if shift == 0:
+        # حالت همه شیفت‌ها — جزئیات هر شیفت رو نشون میده
+        shift_detail = "\n".join(
+            f"  شیفت {i}: {len(POOL.shifts.get(i,[]))} اکانت"
+            for i in range(1, 5)
+        )
         text = (
-            f"🌐 <b>همه شیفت‌ها فعال شدن</b>\n"
-            f"🟢 متصل: <b>{connected}/{total}</b>"
+            f"🌐 <b>همه شیفت‌ها فعال شدن</b>\n\n"
+            f"🟢 متصل: <b>{rep['connected']}/{rep['total']}</b>\n\n"
+            f"{shift_detail}"
         )
     else:
         text = (
             f"🔢 <b>شیفت فعال</b>\n\n✅ شیفت <b>{shift}</b> فعال شد.\n"
-            f"🟢 متصل: <b>{connected}/{total}</b>"
+            f"🟢 متصل: <b>{rep['connected']}/{rep['total']}</b>"
         )
+        if rep["total"] == 0:
+            text += "\n\n⚠️ این شیفت هیچ اکانتی نداره."
+
+    for phone, err in list(rep["errors"].items())[:8]:
+        text += f"\n🔴 <code>{phone}</code>\n    <code>{err[:110]}</code>"
     try:
         await cb.message.edit_text(text, reply_markup=shift_select_menu(shift), parse_mode="HTML")
     except Exception:
@@ -602,14 +706,15 @@ async def cb_accounts(cb: types.CallbackQuery, state: FSMContext):
             )
 
     elif action == "add":
-        await cb.message.edit_text(
+        await state.set_state(AddAccount.waiting_phone)
+        await cb.answer("✅ شماره رو بفرست")
+        await cb.message.answer(
             "➕ <b>افزودن اکانت جدید</b>\n\n"
             "شماره رو با فرمت بین‌المللی بفرست:\n"
             "<code>+989123456789</code>",
             reply_markup=cancel_menu(),
             parse_mode="HTML",
         )
-        await state.set_state(AddAccount.waiting_phone)
 
     elif action == "rotate":
         from core.scheduler import AccountScheduler
@@ -618,12 +723,11 @@ async def cb_accounts(cb: types.CallbackQuery, state: FSMContext):
         await cb.message.edit_text(_status_text(), reply_markup=status_menu(), parse_mode="HTML")
 
     elif action == "cleanup":
-        # ✅ FIX: جایگزین raw SQL با Supabase
-        sb = db._get_client()
-        res = sb.table("accounts").update(
-            {"status": "idle", "flood_until": None}
-        ).eq("status", "flood").execute()
-        n = len(res.data) if res.data else 0
+        from supabase import create_client
+        sb = create_client(Config.SUPABASE_URL, Config.SUPABASE_KEY)
+        res = sb.table("accounts").select("id", count="exact").eq("status", "flood").execute()
+        n = res.count or 0
+        sb.table("accounts").update({"status": "idle", "flood_until": None}).eq("status", "flood").execute()
         await cb.answer(f"✅ {n} اکانت آزاد شد", show_alert=True)
 
     elif action == "backup":
@@ -635,13 +739,13 @@ async def cb_accounts(cb: types.CallbackQuery, state: FSMContext):
             await cb.answer(f"❌ خطا: {e}", show_alert=True)
 
     elif action == "info":
-        # ✅ FIX: جایگزین raw SQL با db helper
         acc_id = int(d[2])
-        # get by id
-        sb  = db._get_client()
-        res = sb.table("accounts").select("*").eq("id", acc_id).maybe_single().execute()
-        a   = res.data
-        if a:
+        from supabase import create_client
+        sb = create_client(Config.SUPABASE_URL, Config.SUPABASE_KEY)
+        res = sb.table("accounts").select("*").eq("id", acc_id).limit(1).execute()
+        row = res.data[0] if res and res.data else None
+        if row:
+            a    = row
             icon = {"online": "🟢", "flood": "🟡", "error": "🔴", "idle": "💤"}.get(a["status"], "⚪")
             text = (
                 f"<b>📱 اکانت #{acc_id}</b>\n"
@@ -674,25 +778,29 @@ async def cb_stats(cb: types.CallbackQuery):
     if data == "general":
         accounts = db.get_all_accounts()
         counts   = db.count_by_status()
+        from core.pool import POOL
+        _SHIFT_EMOJIS = ["1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"]
+        active_lbl = "🌐 همه شیفت‌ها" if POOL.active_shift == 0 else f"شیفت {POOL.active_shift}"
+        shift_lines = "\n".join(
+            f"{_SHIFT_EMOJIS[i-1] if i <= len(_SHIFT_EMOJIS) else '🔢'} شیفت {i}: "
+            f"<b>{sum(1 for a in accounts if str(a.get('shift','')) == str(i))}</b>"
+            for i in range(1, POOL.num_shifts + 1)
+        )
         await cb.message.edit_text(
             f"📊 <b>آمار کلی</b>\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"🔢 شیفت فعال: <b>{active_lbl}</b>\n"
+            f"📋 تعداد شیفت‌ها: <b>{POOL.num_shifts}</b>\n"
             f"👥 کل اکانت: <b>{len(accounts)}</b>\n"
             f"🟢 آنلاین: <b>{counts.get('online', 0)}</b>\n"
             f"💤 استراحت: <b>{counts.get('idle', 0)}</b>\n"
             f"🟡 Flood: <b>{counts.get('flood', 0)}</b>\n"
             f"🔴 خطا: <b>{counts.get('error', 0)}</b>\n\n"
-            f"🅰️ شیفت A: <b>{sum(1 for a in accounts if a['shift']=='A')}</b>\n"
-            f"🅱️ شیفت B: <b>{sum(1 for a in accounts if a['shift']=='B')}</b>",
+            f"{shift_lines}",
             reply_markup=stats_menu(), parse_mode="HTML",
         )
 
     elif data == "daily":
-        # ✅ FIX: جایگزین raw SQL با Supabase query
-        sb  = db._get_client()
-        from datetime import datetime, timedelta
-        since = (datetime.utcnow() - timedelta(hours=24)).isoformat()
-        res   = sb.table("debug_log").select("id", count="exact").eq("step", "new_msg").gte("created_at", since).execute()
-        msgs  = res.count or 0
+        msgs = db.count_debug_log_since("new_msg", hours=24)
         await cb.message.edit_text(
             f"📈 <b>آمار ۲۴ ساعت</b>\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
             f"📨 پیام‌های جدید: <b>{msgs}</b>\n",
@@ -702,9 +810,9 @@ async def cb_stats(cb: types.CallbackQuery):
     elif data == "shift":
         from core.scheduler import AccountScheduler, _STATE
         from core.pool import POOL
-        cur    = POOL.active_shift
+        cur = POOL.active_shift
         nxt_dt = _STATE.get("next_swap_at")
-        nxt    = nxt_dt.strftime("%H:%M:%S") if nxt_dt else "?"
+        nxt = nxt_dt.strftime("%H:%M:%S") if nxt_dt else "?"
         last_iv = _STATE.get("last_interval", 0)
         mn = int(db.get_setting("shift_min_sec", Config.SHIFT_MIN_SEC)) // 60
         mx = int(db.get_setting("shift_max_sec", Config.SHIFT_MAX_SEC)) // 60
@@ -718,19 +826,11 @@ async def cb_stats(cb: types.CallbackQuery):
         )
 
     elif data == "chart":
-        # ✅ FIX: جایگزین raw SQL با Supabase
-        sb  = db._get_client()
-        from datetime import datetime, timedelta
-        since = (datetime.utcnow() - timedelta(hours=12)).isoformat()
-        res   = sb.table("debug_log").select("created_at").eq("step", "read_done").eq("status", "RESULT").gte("created_at", since).execute()
-        # گروه‌بندی دستی بر اساس ساعت
-        hour_counts: dict = {}
-        for row in (res.data or []):
-            h = str(row["created_at"])[11:13]
-            hour_counts[h] = hour_counts.get(h, 0) + 1
+        rows = db.chart_reads_last_12h()
         text = "📉 <b>نمودار ۱۲ ساعت</b>\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        for h in sorted(hour_counts):
-            ok  = hour_counts[h]
+        for r in rows:
+            h   = r["h"]
+            ok  = r["ok"] or 0
             bar = "▰" * min(ok, 20) + "▱" * max(0, 20 - min(ok, 20))
             text += f"<code>{h}:00</code> {bar} <b>{ok}</b>\n"
         await cb.message.edit_text(text, reply_markup=stats_menu(), parse_mode="HTML")
@@ -757,53 +857,17 @@ async def _join_group(client):
     if not group_id:
         return
     try:
-        entity = await client.get_entity(group_id)
+        from core.entity import resolve_group_entity
+        entity = await resolve_group_entity(client, group_id, timeout=15)
         from telethon.tl.functions.channels import JoinChannelRequest
         await client(JoinChannelRequest(entity))
     except Exception as e:
         err = str(e).lower()
         if "already" not in err and "participant" not in err:
-            db.debug_log("handlers", "join_group", "WARN", f"{type(e).__name__}")
+            db.debug_log("handlers", "join_group", "WARN", f"{type(e).__name__}: {str(e)[:100]}")
 
 
-async def _add_to_pool_hot(phone: str, ss: str):
-    """
-    ✅ FIX: اکانت جدید رو بلافاصله به POOL اضافه می‌کنه
-    بدون نیاز به ری‌استارت ربات
-    """
-    try:
-        from core.pool import POOL
-        from core.engine import make_client
-
-        # اگه POOL هنوز init نشده، کاری نکن — init خودش اکانت‌ها رو لود می‌کنه
-        if not POOL._initialized:
-            return
-
-        # اکانت رو به all_phones اضافه کن اگه قبلاً نبوده
-        if phone not in POOL.all_phones:
-            POOL.all_phones.append(phone)
-
-        # به شیفت 1 اضافه کن (کم‌جمعیت‌ترین شیفت رو پیدا کن)
-        min_shift = min(POOL.shifts, key=lambda k: len(POOL.shifts[k]))
-        if phone not in POOL.shifts[min_shift]:
-            POOL.shifts[min_shift].append(phone)
-
-        # کانکت کن
-        client = make_client(ss, phone=phone)
-        await asyncio.wait_for(client.connect(), timeout=25)
-        ok = await asyncio.wait_for(client.is_user_authorized(), timeout=10)
-        if ok:
-            POOL.clients[phone] = client
-            db.update_account_status(phone, "online")
-            db.debug_log("handlers", "hot_add", "OK", f"{phone} → shift {min_shift}")
-        else:
-            await client.disconnect()
-            db.debug_log("handlers", "hot_add", "WARN", f"{phone} not authorized")
-    except Exception as e:
-        db.debug_log("handlers", "hot_add", "ERROR", f"{phone}: {type(e).__name__}: {e}")
-
-
-@router.message(F.text.startswith("➕"))
+@router.message(F.text.in_({"➕ افزودن اکانت", "➕ افزودن", "➕ افزودن جدید"}))
 async def add_account_start(msg: types.Message, state: FSMContext):
     if not await guard_admin(msg): return
     await state.set_state(AddAccount.waiting_phone)
@@ -813,7 +877,7 @@ async def add_account_start(msg: types.Message, state: FSMContext):
         "━━━━━━━━━━━━━━━━━━━━━━\n\n"
         "شماره رو با فرمت بین‌المللی بفرست:\n"
         "<code>+989123456789</code>\n\n"
-        f"💡 اکانت خودکار عضو گروه می‌شه: <code>{group_id or 'تنظیم نشده'}</code>",
+        f"💡 اکانت خودکار عضو گروه می‌شه: <code>{db.fmt_group(group_id)}</code>",
         reply_markup=cancel_menu(),
         parse_mode="HTML",
     )
@@ -822,11 +886,17 @@ async def add_account_start(msg: types.Message, state: FSMContext):
 @router.message(StateFilter(AddAccount.waiting_phone))
 async def add_phone(msg: types.Message, state: FSMContext):
     if not await guard_admin(msg): return
-    phone = msg.text.strip()
-    if not phone.startswith("+") or len(phone) < 10:
+    phone = _normalize_phone(msg.text or "")
+    if not phone:
         await msg.answer("❌ فرمت اشتباه. مثال: <code>+989123456789</code>", parse_mode="HTML")
         return
-    if db.get_account(phone):
+    try:
+        exists = db.get_account(phone)
+    except Exception as e:
+        db.debug_log("handlers", "add_phone", "ERROR", f"{type(e).__name__}: {e}")
+        await msg.answer(f"❌ خطای دیتابیس: <code>{type(e).__name__}: {str(e)[:150]}</code>", parse_mode="HTML")
+        return
+    if exists:
         await msg.answer("⚠️ این شماره قبلاً ثبت شده.")
         await state.clear()
         return
@@ -881,8 +951,13 @@ async def add_code(msg: types.Message, state: FSMContext):
         _pending.pop(msg.from_user.id, None)
         acc_id = db.add_account(phone, ss)
 
-        # ✅ FIX: اضافه کردن hot به POOL
-        asyncio.create_task(_add_to_pool_hot(phone, ss))
+        # اکانت جدید رو بلافاصله وارد pool کن (با کلاینت تازه، نه کلاینت قطع‌شده)
+        pool_ok = False
+        try:
+            from core.pool import POOL
+            pool_ok = await asyncio.wait_for(POOL.add_account_live(phone), timeout=40) is not None
+        except Exception as _pe:
+            db.debug_log("handlers", "pool_add", "WARN", f"{type(_pe).__name__}: {_pe}")
 
         await msg.answer(
             f"✅ <b>اکانت اضافه شد!</b>\n"
@@ -891,7 +966,7 @@ async def add_code(msg: types.Message, state: FSMContext):
             f"🆔 یوزرنیم: @{me.username or 'ندارد'}\n"
             f"🎫 شناسه: <code>{acc_id}</code>\n"
             f"👥 عضو گروه: ✅\n"
-            f"🔌 در حال اتصال به Pool...",
+            f"🔌 اتصال به pool: {'✅' if pool_ok else '⚠️ بعداً خودکار وصل میشه'}",
             reply_markup=main_menu(),
             parse_mode="HTML",
         )
@@ -926,15 +1001,10 @@ async def add_password(msg: types.Message, state: FSMContext):
         await c.disconnect()
         _pending.pop(msg.from_user.id, None)
         acc_id = db.add_account(phone, ss)
-
-        # ✅ FIX: اضافه کردن hot به POOL
-        asyncio.create_task(_add_to_pool_hot(phone, ss))
-
         await msg.answer(
             f"✅ <b>اکانت با 2FA اضافه شد!</b>\n\n"
             f"👤 {me.first_name}\n"
-            f"🎫 {acc_id}\n"
-            f"🔌 در حال اتصال به Pool...",
+            f"🎫 {acc_id}",
             reply_markup=main_menu(),
             parse_mode="HTML",
         )
@@ -959,158 +1029,170 @@ async def add_cancel(cb: types.CallbackQuery, state: FSMContext):
 
 
 # ─────────────────────────────────────────────────────────
-# ViewGuard handlers
+# register
 # ─────────────────────────────────────────────────────────
+async def _on_error(event: types.ErrorEvent):
+    exc = event.exception
+    db.debug_log("handlers", "unhandled", "ERROR", f"{type(exc).__name__}: {exc}")
+    upd = event.update
+    chat = None
+    if upd.message:
+        chat = upd.message.chat.id
+    elif upd.callback_query and upd.callback_query.message:
+        chat = upd.callback_query.message.chat.id
+    if chat:
+        try:
+            await upd.bot.send_message(
+                chat, f"⚠️ <b>خطای داخلی</b>\n<code>{type(exc).__name__}: {str(exc)[:200]}</code>",
+                parse_mode="HTML")
+        except Exception:
+            pass
+    return True
 
 
+def _num_shifts_menu(current: int = 0):
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    b = InlineKeyboardBuilder()
+    b.button(text="🔙 برگشت به تنظیمات", callback_data="menu:settings")
+    return b.as_markup()
 
 
-@router.callback_query(F.data == "vg:stats")
-async def cb_vg_stats(cb: types.CallbackQuery):
-    from core.view_guard import VIEW_GUARD, MAX_VIEWS_PER_DAY
-    st = VIEW_GUARD.stats()
-    pct = (st['total_views_today'] / max(st['total_accounts'] * MAX_VIEWS_PER_DAY, 1)) * 100
-    await cb.answer(
-        f"👁 ویو امروز: {st['total_views_today']}\n"
-        f"🟡 Flood: {st['flooded_now']} اکانت\n"
-        f"💤 سهمیه تموم: {st['exhausted_today']} اکانت\n"
-        f"📈 مصرف سهمیه: {pct:.1f}%",
-        show_alert=True
-    )
+@router.callback_query(F.data.startswith("vg:"))
+async def cb_viewguard(cb: types.CallbackQuery, state: FSMContext):
+    from bot.keyboards import viewguard_menu
+    action = cb.data.split(":")[1]
 
+    if action == "stats":
+        daily_quota = int(db.get_setting("vg_daily_quota",  200))
+        gap_min     = int(db.get_setting("vg_gap_min_sec",  3))
+        gap_max     = int(db.get_setting("vg_gap_max_sec",  8))
+        today_count = int(db.get_setting("vg_today_count",  0))
+        remaining   = max(0, daily_quota - today_count)
+        pct         = int(today_count / daily_quota * 100) if daily_quota else 0
+        bar_filled  = int(pct / 10)
+        bar         = "▰" * bar_filled + "▱" * (10 - bar_filled)
+        await cb.answer(
+            f"📊 ویو امروز: {today_count}/{daily_quota} ({pct}%)\n"
+            f"{bar}\n"
+            f"⏳ فاصله: {gap_min}-{gap_max}s | مانده: {remaining}",
+            show_alert=True,
+        )
 
-@router.callback_query(F.data == "vg:reset")
-async def cb_vg_reset(cb: types.CallbackQuery):
-    from core.view_guard import VIEW_GUARD
-    for st in VIEW_GUARD._state.values():
-        st.views_today = 0
-        st.day_key     = ""
-        st.seen_msgs.clear()
-        st.seen_times.clear()
-    await cb.answer("✅ آمار امروز ریست شد — همه اکانت‌ها دوباره مجاز به ویو هستن", show_alert=True)
+    elif action == "reset":
+        db.set_setting("vg_today_count", 0)
+        await cb.answer("✅ آمار امروز ریست شد", show_alert=True)
+        daily_quota = int(db.get_setting("vg_daily_quota", 200))
+        gap_min     = int(db.get_setting("vg_gap_min_sec", 3))
+        gap_max     = int(db.get_setting("vg_gap_max_sec", 8))
+        try:
+            await cb.message.edit_text(
+                f"🔒 <b>تنظیمات ضد لیمیت (ViewGuard)</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"📊 ویوهای امروز: <b>0</b> / <b>{daily_quota}</b>\n"
+                f"⏳ فاصله بین ویوها: <b>{gap_min}-{gap_max} ثانیه</b>\n\n"
+                f"👇 گزینه مورد نظر:",
+                reply_markup=viewguard_menu(),
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
 
-
-class _VGSetState(StatesGroup):
-    daily = State()
-    gap   = State()
-
-
-@router.callback_query(F.data == "vg:set_daily")
-async def cb_vg_set_daily(cb: types.CallbackQuery, state: FSMContext):
-    from core.view_guard import MAX_VIEWS_PER_DAY
-    await state.set_state(_VGSetState.daily)
-    await cb.message.edit_text(
-        f"📅 <b>تنظیم سهمیه روزانه</b>\n\n"
-        f"سهمیه فعلی: <b>{MAX_VIEWS_PER_DAY}</b> ویو/اکانت/روز\n\n"
-        f"عدد جدید رو بفرست (پیشنهاد: ۵۰ تا ۱۲۰):",
-        parse_mode="HTML", reply_markup=cancel_menu()
-    )
-    await cb.answer()
-
-
-@router.message(_VGSetState.daily)
-async def msg_vg_daily(msg: types.Message, state: FSMContext):
-    import core.view_guard as vg_mod
-    try:
-        val = int(msg.text.strip())
-        assert 10 <= val <= 300
-        vg_mod.MAX_VIEWS_PER_DAY = val
-        db.set_setting("vg_max_views_per_day", val)
-        await msg.answer(f"✅ سهمیه روزانه به <b>{val}</b> تغییر کرد.", parse_mode="HTML",
-                         reply_markup=viewguard_menu())
-    except Exception:
-        await msg.answer("❌ عدد معتبر وارد کن (۱۰ تا ۳۰۰)", reply_markup=cancel_menu())
+    elif action == "set_daily":
+        await cb.message.edit_text(
+            "⚙️ <b>سهمیه روزانه ویو</b>\n\n"
+            "تعداد ویو مجاز در روز رو وارد کن:\n"
+            "<code>200</code>  (پیش‌فرض)\n\n"
+            "عدد رو بفرست:",
+            reply_markup=cancel_menu(),
+            parse_mode="HTML",
+        )
+        await state.set_state(_VGState.waiting_daily_quota)
+        await cb.answer()
         return
-    await state.clear()
 
-
-@router.callback_query(F.data == "vg:set_gap")
-async def cb_vg_set_gap(cb: types.CallbackQuery, state: FSMContext):
-    from core.view_guard import MIN_GAP_SEC, MAX_GAP_SEC
-    await state.set_state(_VGSetState.gap)
-    await cb.message.edit_text(
-        f"⏳ <b>تنظیم فاصله بین ویو</b>\n\n"
-        f"فاصله فعلی: <b>{MIN_GAP_SEC:.0f}–{MAX_GAP_SEC:.0f}</b> ثانیه\n\n"
-        f"دو عدد بفرست (min max) مثلاً: <code>8 25</code>",
-        parse_mode="HTML", reply_markup=cancel_menu()
-    )
-    await cb.answer()
-
-
-@router.message(_VGSetState.gap)
-async def msg_vg_gap(msg: types.Message, state: FSMContext):
-    import core.view_guard as vg_mod
-    try:
-        parts = msg.text.strip().split()
-        mn, mx = int(parts[0]), int(parts[1])
-        assert 3 <= mn < mx <= 120
-        vg_mod.MIN_GAP_SEC = float(mn)
-        vg_mod.MAX_GAP_SEC = float(mx)
-        db.set_setting("vg_min_gap", mn)
-        db.set_setting("vg_max_gap", mx)
-        await msg.answer(f"✅ فاصله به <b>{mn}–{mx}</b> ثانیه تغییر کرد.", parse_mode="HTML",
-                         reply_markup=viewguard_menu())
-    except Exception:
-        await msg.answer("❌ فرمت اشتباه. مثال: <code>8 25</code>", parse_mode="HTML",
-                         reply_markup=cancel_menu())
+    elif action == "set_gap":
+        await cb.message.edit_text(
+            "⏳ <b>فاصله بین ویوها</b>\n\n"
+            "دو عدد بفرست (ثانیه): حداقل حداکثر\n"
+            "<code>3 8</code>  (پیش‌فرض)\n\n"
+            "مثال: <code>5 12</code>",
+            reply_markup=cancel_menu(),
+            parse_mode="HTML",
+        )
+        await state.set_state(_VGState.waiting_gap)
+        await cb.answer()
         return
-    await state.clear()
 
-
-# ─────────────────────────────────────────────────────────
-# تعداد شیفت‌ها
-# ─────────────────────────────────────────────────────────
-
-class _NSState(StatesGroup):
-    waiting = State()
-
-
-
-@router.message(_NSState.waiting)
-async def msg_set_num_shifts(msg: types.Message, state: FSMContext):
-    from core.pool import POOL
     try:
-        n = int(msg.text.strip())
-        assert 1 <= n <= 20
+        await cb.answer()
     except Exception:
-        await msg.answer("❌ عدد معتبر وارد کن (۱ تا ۲۰)", reply_markup=cancel_menu())
-        return
-    old = POOL.num_shifts
-    POOL.set_num_shifts(n)
-    await state.clear()
-    await msg.answer(
-        f"✅ تعداد شیفت‌ها از <b>{old}</b> به <b>{n}</b> تغییر کرد.\n\n"
-        f"📋 توزیع جدید:\n" +
-        "\n".join(
-            f"  شیفت {i}: <b>{len(POOL.shifts.get(i,[]))}</b> اکانت"
-            for i in range(1, n + 1)
-        ),
-        parse_mode="HTML",
-        reply_markup=settings_menu(),
-    )
+        pass
 
 
 @router.callback_query(F.data == "menu:settings")
-async def cb_menu_settings(cb: types.CallbackQuery):
+async def cb_back_to_settings(cb: types.CallbackQuery):
+    mn = int(db.get_setting("shift_min_sec", Config.SHIFT_MIN_SEC)) // 60
+    mx = int(db.get_setting("shift_max_sec", Config.SHIFT_MAX_SEC)) // 60
     from core.pool import POOL
-    mn = db.get_setting("shift_min", 15)
-    mx = db.get_setting("shift_max", 30)
+    from bot.keyboards import settings_menu
     active = POOL.active_shift
-    active_lbl = "🌐 همه شیفت‌ها" if active == 0 else f"شیفت {active}"
-    await cb.message.edit_text(
-        f"⚙️ <b>تنظیمات</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"⏱️ بازه شیفت: <b>{mn}-{mx} دقیقه</b>\n"
-        f"🔢 شیفت فعال: <b>{active_lbl}</b>\n\n"
-        f"👇 گزینه مورد نظر:",
-        reply_markup=settings_menu(),
-        parse_mode="HTML",
-    )
+    try:
+        await cb.message.edit_text(
+            f"⚙️ <b>تنظیمات</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"⏱️ بازه شیفت: <b>{mn}-{mx} دقیقه</b>\n"
+            f"🔢 شیفت فعال: <b>{active}</b>\n\n"
+            f"👇 گزینه مورد نظر:",
+            reply_markup=settings_menu(),
+            parse_mode="HTML",
+        )
+    except Exception:
+        pass
     await cb.answer()
 
 
-# ─────────────────────────────────────────────────────────
-# register
-# ─────────────────────────────────────────────────────────
+from aiogram.fsm.state import State, StatesGroup
+
+class _VGState(StatesGroup):
+    waiting_daily_quota = State()
+    waiting_gap         = State()
+
+
+@router.message(StateFilter(_VGState.waiting_daily_quota))
+async def vg_set_daily(msg: types.Message, state: FSMContext):
+    if not await guard(msg): return
+    raw = (msg.text or "").strip().translate(_FA_DIGITS)
+    if not raw.isdigit() or int(raw) < 1:
+        await msg.answer("❌ عدد معتبر وارد کن (مثال: <code>200</code>)", parse_mode="HTML")
+        return
+    db.set_setting("vg_daily_quota", int(raw))
+    await msg.answer(
+        f"✅ سهمیه روزانه تنظیم شد: <b>{raw} ویو</b>",
+        reply_markup=main_menu(), parse_mode="HTML",
+    )
+    await state.clear()
+
+
+@router.message(StateFilter(_VGState.waiting_gap))
+async def vg_set_gap(msg: types.Message, state: FSMContext):
+    if not await guard(msg): return
+    parts = (msg.text or "").strip().translate(_FA_DIGITS).split()
+    if len(parts) != 2 or not all(p.isdigit() for p in parts):
+        await msg.answer("❌ فرمت اشتباه. مثال: <code>3 8</code>", parse_mode="HTML")
+        return
+    mn, mx = int(parts[0]), int(parts[1])
+    if mn < 1 or mx <= mn:
+        await msg.answer("❌ حداقل باید کمتر از حداکثر باشه.", parse_mode="HTML")
+        return
+    db.set_setting("vg_gap_min_sec", mn)
+    db.set_setting("vg_gap_max_sec", mx)
+    await msg.answer(
+        f"✅ فاصله ویو تنظیم شد: <b>{mn}-{mx} ثانیه</b>",
+        reply_markup=main_menu(), parse_mode="HTML",
+    )
+    await state.clear()
+
+
 def register_handlers(dp):
     dp.include_router(router)
+    dp.errors.register(_on_error)
