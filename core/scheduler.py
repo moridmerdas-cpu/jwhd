@@ -65,11 +65,12 @@ class AccountScheduler:
                     await asyncio.sleep(min(remaining, 3))
                     continue
                 old = POOL.active_shift
-                new = POOL.swap_cycle()
+                new = (old % POOL.num_shifts) + 1
                 _STATE["swap_count"] += 1
                 interval = self._schedule_next()
+                result = await POOL.activate_shift(new)
                 db.debug_log("scheduler", "swap", "OK",
-                             f"🔄 {old} → {new} | +{interval}s | #{_STATE['swap_count']}")
+                             f"🔄 {old} → {new} | +{interval}s | #{_STATE['swap_count']} | connected:{result['connected']}/{result['total']}")
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -79,8 +80,9 @@ class AccountScheduler:
     async def rotate_now(self):
         from core.pool import POOL
         old = POOL.active_shift
-        new = POOL.swap_cycle()
+        new = (old % POOL.num_shifts) + 1
         self._schedule_next()
+        await POOL.activate_shift(new)
         return new
 
     def start(self):
