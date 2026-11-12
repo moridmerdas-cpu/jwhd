@@ -484,10 +484,54 @@ async def cb_settings(cb: types.CallbackQuery, state: FSMContext):
         except Exception as e:
             await cb.answer(f"❌ خطا: {e}", show_alert=True)
 
+    elif data == "num_shifts":
+        from core.pool import POOL
+        mn = int(db.get_setting("shift_min_sec", Config.SHIFT_MIN_SEC)) // 60
+        mx = int(db.get_setting("shift_max_sec", Config.SHIFT_MAX_SEC)) // 60
+        shift_lines = "\n".join(
+            f"  شیفت {i}: <b>{len(POOL.shifts.get(i, []))}</b> اکانت"
+            for i in range(1, POOL.num_shifts + 1)
+        )
+        await cb.message.edit_text(
+            f"🔢 <b>تعداد شیفت‌ها</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📋 شیفت‌های فعال: <b>{POOL.num_shifts}</b>\n"
+            f"⏱️ بازه چرخش: <b>{mn}-{mx} دقیقه</b>\n\n"
+            f"{shift_lines}\n\n"
+            f"💡 اکانت‌ها رو از منوی اکانت‌ها به شیفت‌های مختلف اختصاص بده.",
+            reply_markup=_back_to_settings_kb(),
+            parse_mode="HTML",
+        )
+
+    elif data == "viewguard":
+        from core.view_guard import VIEW_GUARD, MAX_VIEWS_PER_DAY, MIN_GAP_SEC, MAX_GAP_SEC
+        from bot.keyboards import viewguard_menu
+        stats = VIEW_GUARD.stats()
+        await cb.message.edit_text(
+            f"🔒 <b>تنظیمات ضد لیمیت (ViewGuard)</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📊 ویوهای امروز (کل): <b>{stats['total_views_today']}</b>\n"
+            f"🚫 اکانت‌های flood: <b>{stats['flooded_now']}</b>\n"
+            f"💤 سهمیه تموم‌شده: <b>{stats['exhausted_today']}</b>\n\n"
+            f"⚙️ تنظیمات فعلی:\n"
+            f"  📅 سهمیه روزانه هر اکانت: <b>{MAX_VIEWS_PER_DAY}</b>\n"
+            f"  ⏳ فاصله بین ویو: <b>{MIN_GAP_SEC:.0f}-{MAX_GAP_SEC:.0f} ثانیه</b>\n\n"
+            f"👇 گزینه مورد نظر:",
+            reply_markup=viewguard_menu(),
+            parse_mode="HTML",
+        )
+
     try:
         await cb.answer()
     except Exception:
         pass
+
+
+def _back_to_settings_kb():
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    b = InlineKeyboardBuilder()
+    b.button(text="🔙 برگشت به تنظیمات", callback_data="menu:settings")
+    return b.as_markup()
 
 
 # تنظیم بازه شیفت — پیش‌فرض
@@ -1012,6 +1056,158 @@ async def _on_error(event: types.ErrorEvent):
         except Exception:
             pass
     return True
+
+
+# ─────────────────────────────────────────────────────────
+# ViewGuard FSM states
+# ─────────────────────────────────────────────────────────
+from aiogram.fsm.state import State, StatesGroup
+
+class _VGState(StatesGroup):
+    waiting_daily_quota = State()
+    waiting_gap         = State()
+
+
+# ─────────────────────────────────────────────────────────
+# Callback: menu:settings (برگشت به تنظیمات)
+# ─────────────────────────────────────────────────────────
+@router.callback_query(F.data == "menu:settings")
+async def cb_back_settings(cb: types.CallbackQuery):
+    from bot.keyboards import settings_menu
+    from core.pool import POOL
+    mn = int(db.get_setting("shift_min_sec", Config.SHIFT_MIN_SEC)) // 60
+    mx = int(db.get_setting("shift_max_sec", Config.SHIFT_MAX_SEC)) // 60
+    try:
+        await cb.message.edit_text(
+            f"⚙️ <b>تنظیمات</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"⏱️ بازه شیفت: <b>{mn}-{mx} دقیقه</b>\n"
+            f"🔢 شیفت فعال: <b>{POOL.active_shift}</b>\n\n"
+            f"👇 گزینه مورد نظر:",
+            reply_markup=settings_menu(),
+            parse_mode="HTML",
+        )
+    except Exception:
+        pass
+    await cb.answer()
+
+
+# ─────────────────────────────────────────────────────────
+# Callback: vg:* (ViewGuard)
+# ─────────────────────────────────────────────────────────
+@router.callback_query(F.data.startswith("vg:"))
+async def cb_viewguard(cb: types.CallbackQuery, state: FSMContext):
+    from core.view_guard import VIEW_GUARD, MAX_VIEWS_PER_DAY, MIN_GAP_SEC, MAX_GAP_SEC
+    from bot.keyboards import viewguard_menu
+    action = cb.data.split(":")[1]
+
+    if action == "stats":
+        stats = VIEW_GUARD.stats()
+        pct   = int(stats["total_views_today"] / max(stats["total_accounts"] * MAX_VIEWS_PER_DAY, 1) * 100)
+        bar   = "▰" * min(pct // 10, 10) + "▱" * max(0, 10 - pct // 10)
+        await cb.answer(
+            f"📊 ویوی امروز: {stats['total_views_today']}\n"
+            f"{bar}\n"
+            f"🚫 flood: {stats['flooded_now']} | 💤 تموم: {stats['exhausted_today']}",
+            show_alert=True,
+        )
+
+    elif action == "reset":
+        # ریست state همه اکانت‌ها
+        from core.view_guard import _AccountState
+        for st in VIEW_GUARD._state.values():
+            st.views_today = 0
+            st.day_key     = ""
+        await cb.answer("✅ آمار ویو همه اکانت‌ها ریست شد", show_alert=True)
+        # آپدیت متن
+        stats = VIEW_GUARD.stats()
+        try:
+            await cb.message.edit_text(
+                f"🔒 <b>تنظیمات ضد لیمیت (ViewGuard)</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"📊 ویوهای امروز (کل): <b>0</b>\n"
+                f"🚫 اکانت‌های flood: <b>{stats['flooded_now']}</b>\n"
+                f"💤 سهمیه تموم‌شده: <b>0</b>\n\n"
+                f"⚙️ تنظیمات فعلی:\n"
+                f"  📅 سهمیه روزانه هر اکانت: <b>{MAX_VIEWS_PER_DAY}</b>\n"
+                f"  ⏳ فاصله بین ویو: <b>{MIN_GAP_SEC:.0f}-{MAX_GAP_SEC:.0f} ثانیه</b>\n\n"
+                f"👇 گزینه مورد نظر:",
+                reply_markup=viewguard_menu(),
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
+
+    elif action == "set_daily":
+        await cb.message.edit_text(
+            f"📅 <b>سهمیه روزانه ویو</b>\n\n"
+            f"فعلی: <b>{MAX_VIEWS_PER_DAY}</b> ویو در روز برای هر اکانت\n\n"
+            f"عدد جدید رو بفرست (مثال: <code>80</code>):",
+            reply_markup=cancel_menu(),
+            parse_mode="HTML",
+        )
+        await state.set_state(_VGState.waiting_daily_quota)
+        await cb.answer()
+        return
+
+    elif action == "set_gap":
+        from core.view_guard import MIN_GAP_SEC, MAX_GAP_SEC
+        await cb.message.edit_text(
+            f"⏳ <b>فاصله بین ویوها</b>\n\n"
+            f"فعلی: <b>{MIN_GAP_SEC:.0f}-{MAX_GAP_SEC:.0f} ثانیه</b>\n\n"
+            f"دو عدد بفرست (ثانیه): حداقل حداکثر\n"
+            f"مثال: <code>8 25</code>",
+            reply_markup=cancel_menu(),
+            parse_mode="HTML",
+        )
+        await state.set_state(_VGState.waiting_gap)
+        await cb.answer()
+        return
+
+    try:
+        await cb.answer()
+    except Exception:
+        pass
+
+
+@router.message(StateFilter(_VGState.waiting_daily_quota))
+async def vg_set_daily(msg: types.Message, state: FSMContext):
+    if not await guard(msg): return
+    raw = (msg.text or "").strip().translate(_FA_DIGITS)
+    if not raw.isdigit() or int(raw) < 1:
+        await msg.answer("❌ عدد معتبر وارد کن (مثال: <code>80</code>)", parse_mode="HTML")
+        return
+    import core.view_guard as vg
+    vg.MAX_VIEWS_PER_DAY = int(raw)
+    db.set_setting("vg_max_views_per_day", int(raw))
+    await msg.answer(
+        f"✅ سهمیه روزانه تنظیم شد: <b>{raw} ویو</b> برای هر اکانت",
+        reply_markup=main_menu(), parse_mode="HTML",
+    )
+    await state.clear()
+
+
+@router.message(StateFilter(_VGState.waiting_gap))
+async def vg_set_gap(msg: types.Message, state: FSMContext):
+    if not await guard(msg): return
+    parts = (msg.text or "").strip().translate(_FA_DIGITS).split()
+    if len(parts) != 2 or not all(p.isdigit() for p in parts):
+        await msg.answer("❌ فرمت اشتباه. مثال: <code>8 25</code>", parse_mode="HTML")
+        return
+    mn, mx = int(parts[0]), int(parts[1])
+    if mn < 1 or mx <= mn:
+        await msg.answer("❌ حداقل باید کمتر از حداکثر باشه.", parse_mode="HTML")
+        return
+    import core.view_guard as vg
+    vg.MIN_GAP_SEC = float(mn)
+    vg.MAX_GAP_SEC = float(mx)
+    db.set_setting("vg_min_gap", mn)
+    db.set_setting("vg_max_gap", mx)
+    await msg.answer(
+        f"✅ فاصله ویو تنظیم شد: <b>{mn}-{mx} ثانیه</b>",
+        reply_markup=main_menu(), parse_mode="HTML",
+    )
+    await state.clear()
 
 
 def register_handlers(dp):
