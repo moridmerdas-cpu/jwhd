@@ -65,12 +65,19 @@ class AccountScheduler:
                     await asyncio.sleep(min(remaining, 3))
                     continue
                 old = POOL.active_shift
-                new = (old % POOL.num_shifts) + 1
+                new = POOL.swap_cycle()
                 _STATE["swap_count"] += 1
                 interval = self._schedule_next()
-                result = await POOL.activate_shift(new)
                 db.debug_log("scheduler", "swap", "OK",
-                             f"🔄 {old} → {new} | +{interval}s | #{_STATE['swap_count']} | connected:{result['connected']}/{result['total']}")
+                             f"🔄 {old} → {new} | +{interval}s | #{_STATE['swap_count']}")
+                # اکانت‌های شیفت جدید رو واقعاً وصل کن
+                try:
+                    await POOL.activate_shift(new)
+                    db.debug_log("scheduler", "activate", "OK",
+                                 f"shift {new} accounts connected")
+                except Exception as ae:
+                    db.debug_log("scheduler", "activate", "ERROR",
+                                 f"shift {new}: {type(ae).__name__}: {ae}")
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -80,9 +87,14 @@ class AccountScheduler:
     async def rotate_now(self):
         from core.pool import POOL
         old = POOL.active_shift
-        new = (old % POOL.num_shifts) + 1
+        new = POOL.swap_cycle()
         self._schedule_next()
-        await POOL.activate_shift(new)
+        # اکانت‌های شیفت جدید رو وصل کن
+        try:
+            await POOL.activate_shift(new)
+        except Exception as ae:
+            db.debug_log("scheduler", "rotate_now_activate", "ERROR",
+                         f"shift {new}: {type(ae).__name__}: {ae}")
         return new
 
     def start(self):

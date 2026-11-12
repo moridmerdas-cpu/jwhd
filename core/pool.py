@@ -188,6 +188,11 @@ class ClientPool:
         """شیفت رو فعال می‌کنه، اکانت‌هاش رو واقعاً وصل می‌کنه، وضعیت‌ها رو sync می‌کنه و گزارش می‌ده.
         shift=0 یعنی همه شیفت‌ها با هم فعال بشن."""
         self.active_shift = shift
+        # ذخیره در DB
+        try:
+            db.set_setting("active_shift", shift)
+        except Exception as e:
+            db.debug_log("pool", "activate_shift", "ERROR", f"DB save failed: {e}")
         if shift == 0:
             phones = list(self.all_phones)
         else:
@@ -222,6 +227,11 @@ class ClientPool:
         if self.active_shift == 0:
             return 0   # حالت all-shifts: scheduler دست نمیزنه
         self.active_shift = (self.active_shift % self.num_shifts) + 1
+        # ذخیره در DB تا بعد از ری‌استارت هم شیفت درست لود بشه
+        try:
+            db.set_setting("active_shift", self.active_shift)
+        except Exception as e:
+            db.debug_log("pool", "swap_cycle", "ERROR", f"DB save failed: {e}")
         self.request_status_sync()
         return self.active_shift
 
