@@ -13,3 +13,8 @@ class SetShiftTiming(StatesGroup):
 
 class SetGroup(StatesGroup):
     waiting_id = State()
+
+
+class UseMembers(StatesGroup):
+    waiting_start_bot_link  = State()   # انتظار لینک دعوت ربات هدف
+    waiting_join_group_link = State()   # انتظار لینک/آیدی گروه هدف

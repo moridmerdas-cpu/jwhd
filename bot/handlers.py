@@ -18,8 +18,9 @@ from bot.keyboards import (
     main_menu, status_menu, accounts_menu, accounts_list_kb,
     stats_menu, settings_menu, group_menu, confirm_menu,
     cancel_menu, view_toggle_menu, shift_select_menu, shift_timing_menu,
+    use_members_menu,
 )
-from bot.states import AddAccount, SetShiftTiming, SetGroup
+from bot.states import AddAccount, SetShiftTiming, SetGroup, UseMembers
 
 router = Router()
 
@@ -420,6 +421,333 @@ async def _join_group_all_task(cb: types.CallbackQuery, group_id):
 
 async def _check_group_join_task(cb: types.CallbackQuery, group_id):
     await _group_members_task(cb, group_id, "check")
+
+
+# ─────────────────────────────────────────────────────────
+# 🤖 استفاده از ممبرها
+# ─────────────────────────────────────────────────────────
+
+@router.message(F.text.startswith("🤖 استفاده از ممبرها"))
+async def show_use_members(msg: types.Message):
+    if not await guard(msg): return
+    total = len(db.get_all_accounts())
+    await msg.answer(
+        f"🤖 <b>استفاده از ممبرها</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"👥 تعداد اکانت‌های موجود: <b>{total}</b>\n\n"
+        f"یکی از عملیات‌ها رو انتخاب کن:",
+        reply_markup=use_members_menu(),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data.startswith("mem:"))
+async def cb_use_members(cb: types.CallbackQuery, state: FSMContext):
+    action = cb.data.split(":")[1]
+
+    if action == "start_bot":
+        await cb.answer()
+        await cb.message.answer(
+            "🚀 <b>استارت ربات</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "لینک دعوت ربات هدف رو بفرست:\n"
+            "<code>https://t.me/botusername?start=xxx</code>\n"
+            "یا یوزرنیم ربات:\n"
+            "<code>@botusername</code>",
+            reply_markup=cancel_menu(),
+            parse_mode="HTML",
+        )
+        await state.set_state(UseMembers.waiting_start_bot_link)
+
+    elif action == "join_group":
+        await cb.answer()
+        await cb.message.answer(
+            "👥 <b>عضو شدن توی گروه</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "لینک یا آیدی گروه/کانال رو بفرست:\n"
+            "<code>https://t.me/groupusername</code>\n"
+            "یا\n"
+            "<code>@groupusername</code>\n"
+            "یا آیدی عددی:\n"
+            "<code>-100xxxxxxxxxx</code>",
+            reply_markup=cancel_menu(),
+            parse_mode="HTML",
+        )
+        await state.set_state(UseMembers.waiting_join_group_link)
+
+    try:
+        await cb.answer()
+    except Exception:
+        pass
+
+
+# ─── FSM: استارت ربات با همه اکانت‌ها ───
+
+@router.message(StateFilter(UseMembers.waiting_start_bot_link))
+async def mem_start_bot_link(msg: types.Message, state: FSMContext):
+    if not await guard(msg): return
+    raw = (msg.text or "").strip()
+    if not raw:
+        await msg.answer("❌ لینک خالیه. دوباره بفرست یا انصراف بزن.")
+        return
+
+    # normalize: extract username and start param if deep link
+    # https://t.me/botname?start=xxx  or  t.me/botname  or  @botname
+    import re
+    username  = None
+    start_param = None
+    deep = re.match(r"(?:https?://)?t\.me/([A-Za-z0-9_]+)\?start=(.+)", raw)
+    if deep:
+        username    = deep.group(1)
+        start_param = deep.group(2)
+    else:
+        plain = re.match(r"(?:https?://)?t\.me/([A-Za-z0-9_]+)", raw)
+        if plain:
+            username = plain.group(1)
+        elif raw.startswith("@"):
+            username = raw[1:]
+        else:
+            username = raw.lstrip("@")
+
+    if not username:
+        await msg.answer("❌ لینک معتبر نیست. دوباره بفرست.")
+        return
+
+    await state.clear()
+    await msg.answer(
+        f"⏳ <b>شروع استارت ربات</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🎯 ربات: <code>@{username}</code>\n"
+        f"🔑 پارامتر: <code>{start_param or '—'}</code>\n\n"
+        f"در حال اجرا...",
+        parse_mode="HTML",
+    )
+    asyncio.create_task(_start_bot_all_task(msg, username, start_param))
+
+
+async def _start_bot_all_task(msg: types.Message, username: str, start_param: str | None):
+    """با همه اکانت‌ها یکی یکی /start می‌زنه روی ربات هدف با تاخیر."""
+    from core.engine import make_client
+    from telethon.tl.functions.messages import StartBotRequest
+    import random
+
+    accounts = db.get_all_accounts()
+    if not accounts:
+        await msg.answer("❌ هیچ اکانتی موجود نیست.")
+        return
+
+    ok = 0
+    errors: list[str] = []
+    delay_min, delay_max = 3, 7   # ثانیه
+
+    progress_msg = await msg.answer(
+        f"🚀 <b>استارت ربات در حال اجرا</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"⏳ 0 / {len(accounts)} اکانت پردازش شد...",
+        parse_mode="HTML",
+    )
+
+    for idx, a in enumerate(accounts, 1):
+        c = None
+        try:
+            c = make_client(db.get_session(a["phone"]), phone=a["phone"])
+            await asyncio.wait_for(c.connect(), timeout=15)
+
+            bot_entity = await asyncio.wait_for(c.get_entity(username), timeout=15)
+            await asyncio.wait_for(
+                c(StartBotRequest(
+                    bot=bot_entity,
+                    peer=bot_entity,
+                    start_param=start_param or "",
+                )),
+                timeout=20,
+            )
+            ok += 1
+        except Exception as e:
+            err_str = f"{a['phone']}: {type(e).__name__}: {str(e)[:60]}"
+            errors.append(err_str)
+            db.debug_log("handlers", "start_bot_all", "WARN", err_str)
+        finally:
+            if c is not None:
+                try:
+                    await c.disconnect()
+                except Exception:
+                    pass
+
+        # آپدیت پروگرس هر ۵ اکانت
+        if idx % 5 == 0 or idx == len(accounts):
+            try:
+                await progress_msg.edit_text(
+                    f"🚀 <b>استارت ربات در حال اجرا</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    f"✅ {ok} / {idx} موفق\n"
+                    f"❌ {idx - ok} خطا",
+                    parse_mode="HTML",
+                )
+            except Exception:
+                pass
+
+        # تاخیر بین اکانت‌ها (آخری نیازی نداره)
+        if idx < len(accounts):
+            await asyncio.sleep(random.uniform(delay_min, delay_max))
+
+    # گزارش نهایی
+    text = (
+        f"✅ <b>استارت ربات تموم شد</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🎯 ربات: <code>@{username}</code>\n"
+        f"✅ موفق: <b>{ok}</b> / {len(accounts)}\n"
+        f"❌ خطا: <b>{len(accounts) - ok}</b>"
+    )
+    for e in errors[:5]:
+        text += f"\n🔴 <code>{e}</code>"
+    if len(errors) > 5:
+        text += f"\n... و {len(errors) - 5} خطای دیگه"
+    await msg.answer(text, reply_markup=main_menu(), parse_mode="HTML")
+
+
+# ─── FSM: عضو شدن توی گروه دلخواه ───
+
+@router.message(StateFilter(UseMembers.waiting_join_group_link))
+async def mem_join_group_link(msg: types.Message, state: FSMContext):
+    if not await guard(msg): return
+    raw = (msg.text or "").strip()
+    if not raw:
+        await msg.answer("❌ لینک خالیه. دوباره بفرست یا انصراف بزن.")
+        return
+
+    import re
+    group_target = None
+    link_match = re.match(r"(?:https?://)?t\.me/(?:joinchat/|\+)?([A-Za-z0-9_+\-]+)", raw)
+    if link_match:
+        slug = link_match.group(1)
+        # اگه hash دعوت‌نامه‌ست (joinchat) کل لینک رو نگه می‌داریم
+        if re.match(r"[A-Za-z0-9_\-]{16,}", slug) and not slug.startswith("+"):
+            group_target = raw   # لینک دعوت خصوصی — کامل لازمه
+        else:
+            group_target = slug.lstrip("+") if slug.startswith("+") else slug
+    elif raw.startswith("@"):
+        group_target = raw[1:]
+    elif raw.lstrip("-").isdigit():
+        group_target = int(raw)
+    else:
+        group_target = raw.lstrip("@")
+
+    if not group_target:
+        await msg.answer("❌ لینک معتبر نیست. دوباره بفرست.")
+        return
+
+    await state.clear()
+    display = raw if isinstance(group_target, str) and raw.startswith("https") else f"<code>{group_target}</code>"
+    await msg.answer(
+        f"⏳ <b>شروع عضویت در گروه</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🎯 گروه: {display}\n\n"
+        f"در حال اجرا...",
+        parse_mode="HTML",
+    )
+    asyncio.create_task(_join_target_group_all_task(msg, group_target))
+
+
+async def _join_target_group_all_task(msg: types.Message, group_target):
+    """با همه اکانت‌ها یکی یکی توی گروه هدف عضو می‌شه با تاخیر."""
+    from core.engine import make_client
+    from core.entity import resolve_group_entity
+    from telethon.tl.functions.channels import JoinChannelRequest
+    from telethon.tl.functions.messages  import ImportChatInviteRequest
+    import random
+
+    accounts = db.get_all_accounts()
+    if not accounts:
+        await msg.answer("❌ هیچ اکانتی موجود نیست.")
+        return
+
+    ok = 0
+    errors: list[str] = []
+    delay_min, delay_max = 3, 8
+
+    # تشخیص لینک دعوت خصوصی
+    is_invite_link = isinstance(group_target, str) and "t.me" in str(group_target)
+
+    # استخراج hash از لینک دعوت
+    invite_hash = None
+    if is_invite_link:
+        import re
+        m = re.search(r"(?:joinchat/|\+)([A-Za-z0-9_\-]+)", str(group_target))
+        if m:
+            invite_hash = m.group(1)
+
+    progress_msg = await msg.answer(
+        f"👥 <b>عضویت در گروه در حال اجرا</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"⏳ 0 / {len(accounts)} اکانت پردازش شد...",
+        parse_mode="HTML",
+    )
+
+    for idx, a in enumerate(accounts, 1):
+        c = None
+        try:
+            c = make_client(db.get_session(a["phone"]), phone=a["phone"])
+            await asyncio.wait_for(c.connect(), timeout=15)
+
+            if invite_hash:
+                # لینک دعوت خصوصی
+                await asyncio.wait_for(
+                    c(ImportChatInviteRequest(invite_hash)),
+                    timeout=20,
+                )
+            else:
+                entity = await asyncio.wait_for(
+                    resolve_group_entity(c, group_target, timeout=15),
+                    timeout=20,
+                )
+                await asyncio.wait_for(
+                    c(JoinChannelRequest(entity)),
+                    timeout=20,
+                )
+            ok += 1
+        except Exception as e:
+            err_low = str(e).lower()
+            if "already" in err_low or "participant" in err_low or "you have already" in err_low:
+                ok += 1   # قبلاً عضو بوده
+            else:
+                err_str = f"{a['phone']}: {type(e).__name__}: {str(e)[:60]}"
+                errors.append(err_str)
+                db.debug_log("handlers", "join_target_group", "WARN", err_str)
+        finally:
+            if c is not None:
+                try:
+                    await c.disconnect()
+                except Exception:
+                    pass
+
+        if idx % 5 == 0 or idx == len(accounts):
+            try:
+                await progress_msg.edit_text(
+                    f"👥 <b>عضویت در گروه در حال اجرا</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    f"✅ {ok} / {idx} موفق\n"
+                    f"❌ {idx - ok} خطا",
+                    parse_mode="HTML",
+                )
+            except Exception:
+                pass
+
+        if idx < len(accounts):
+            await asyncio.sleep(random.uniform(delay_min, delay_max))
+
+    text = (
+        f"✅ <b>عضویت تموم شد</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🎯 گروه: <code>{group_target}</code>\n"
+        f"✅ موفق: <b>{ok}</b> / {len(accounts)}\n"
+        f"❌ خطا: <b>{len(accounts) - ok}</b>"
+    )
+    for e in errors[:5]:
+        text += f"\n🔴 <code>{e}</code>"
+    if len(errors) > 5:
+        text += f"\n... و {len(errors) - 5} خطای دیگه"
+    await msg.answer(text, reply_markup=main_menu(), parse_mode="HTML")
 
 
 # ─────────────────────────────────────────────────────────

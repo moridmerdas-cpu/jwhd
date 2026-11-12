@@ -12,8 +12,18 @@ def main_menu() -> ReplyKeyboardMarkup:
     b.row(KeyboardButton(text="👥 مدیریت اکانت‌ها"), KeyboardButton(text="📈 آمار پیشرفته"))
     b.row(KeyboardButton(text="🎬 روشن/خاموش ویو"),  KeyboardButton(text="🔄 چرخش دستی"))
     b.row(KeyboardButton(text="⚙️ تنظیمات"),          KeyboardButton(text="🎯 گروه هدف"))
-    b.row(KeyboardButton(text="❓ راهنما"))
+    b.row(KeyboardButton(text="🤖 استفاده از ممبرها"), KeyboardButton(text="❓ راهنما"))
     return b.as_markup(resize_keyboard=True)
+
+
+def use_members_menu() -> InlineKeyboardMarkup:
+    """منوی استفاده از ممبرها"""
+    b = InlineKeyboardBuilder()
+    b.button(text="🚀 استارت ربات",         callback_data="mem:start_bot")
+    b.button(text="👥 عضو شدن توی گروه",    callback_data="mem:join_group")
+    b.button(text="🔙 برگشت",               callback_data="menu:main")
+    b.adjust(1)
+    return b.as_markup()
 
 
 def view_toggle_menu(current_paused: bool) -> InlineKeyboardMarkup:
