@@ -398,6 +398,40 @@ async def cb_settings(cb: types.CallbackQuery, state: FSMContext):
         except Exception as e:
             await cb.answer(f"❌ خطا: {e}", show_alert=True)
 
+    elif data == "viewguard":
+        from core.view_guard import VIEW_GUARD, MAX_VIEWS_PER_DAY, MIN_GAP_SEC, MAX_GAP_SEC
+        st = VIEW_GUARD.stats()
+        await cb.message.edit_text(
+            f"🔒 <b>تنظیمات ضد لیمیت (ViewGuard)</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📊 <b>آمار لحظه‌ای:</b>\n"
+            f"  👤 اکانت‌های tracked: <b>{st['total_accounts']}</b>\n"
+            f"  🟡 Flood شده: <b>{st['flooded_now']}</b>\n"
+            f"  💤 سهمیه تموم: <b>{st['exhausted_today']}</b>\n"
+            f"  👁 کل ویو امروز: <b>{st['total_views_today']}</b>\n\n"
+            f"⚙️ <b>تنظیمات فعلی:</b>\n"
+            f"  📅 سهمیه روزانه: <b>{MAX_VIEWS_PER_DAY}</b> ویو/اکانت\n"
+            f"  ⏳ فاصله بین ویو: <b>{MIN_GAP_SEC:.0f}–{MAX_GAP_SEC:.0f}</b> ثانیه\n\n"
+            f"💡 این تنظیمات جلوی view_limit تلگرام رو میگیره.",
+            reply_markup=viewguard_menu(),
+            parse_mode="HTML",
+        )
+
+    elif data == "num_shifts":
+        from core.pool import POOL
+        n = POOL.num_shifts
+        await state.set_state(_NSState.waiting)
+        await cb.message.edit_text(
+            f"🔢 <b>تنظیم تعداد شیفت‌ها</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"تعداد فعلی: <b>{n} شیفت</b>\n\n"
+            f"عدد جدید رو بفرست (۱ تا ۲۰):\n"
+            f"<i>⚠️ اکانت‌هایی که شیفتشون از محدوده خارج بشن، "
+            f"به کم‌جمعیت‌ترین شیفت منتقل میشن.</i>",
+            parse_mode="HTML",
+            reply_markup=cancel_menu(),
+        )
+
     try:
         await cb.answer()
     except Exception:
@@ -928,26 +962,7 @@ async def add_cancel(cb: types.CallbackQuery, state: FSMContext):
 # ViewGuard handlers
 # ─────────────────────────────────────────────────────────
 
-@router.callback_query(F.data == "set:viewguard")
-async def cb_viewguard_menu(cb: types.CallbackQuery):
-    from core.view_guard import VIEW_GUARD, MAX_VIEWS_PER_DAY, MIN_GAP_SEC, MAX_GAP_SEC
-    st = VIEW_GUARD.stats()
-    await cb.message.edit_text(
-        f"🔒 <b>تنظیمات ضد لیمیت (ViewGuard)</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"📊 <b>آمار لحظه‌ای:</b>\n"
-        f"  👤 اکانت‌های tracked: <b>{st['total_accounts']}</b>\n"
-        f"  🟡 Flood شده: <b>{st['flooded_now']}</b>\n"
-        f"  💤 سهمیه تموم: <b>{st['exhausted_today']}</b>\n"
-        f"  👁 کل ویو امروز: <b>{st['total_views_today']}</b>\n\n"
-        f"⚙️ <b>تنظیمات فعلی:</b>\n"
-        f"  📅 سهمیه روزانه: <b>{MAX_VIEWS_PER_DAY}</b> ویو/اکانت\n"
-        f"  ⏳ فاصله بین ویو: <b>{MIN_GAP_SEC:.0f}–{MAX_GAP_SEC:.0f}</b> ثانیه\n\n"
-        f"💡 این تنظیمات جلوی view_limit تلگرام رو میگیره.",
-        reply_markup=viewguard_menu(),
-        parse_mode="HTML",
-    )
-    await cb.answer()
+
 
 
 @router.callback_query(F.data == "vg:stats")
@@ -1049,22 +1064,7 @@ async def msg_vg_gap(msg: types.Message, state: FSMContext):
 class _NSState(StatesGroup):
     waiting = State()
 
-@router.callback_query(F.data == "set:num_shifts")
-async def cb_set_num_shifts(cb: types.CallbackQuery, state: FSMContext):
-    from core.pool import POOL
-    n = POOL.num_shifts
-    await state.set_state(_NSState.waiting)
-    await cb.message.edit_text(
-        f"🔢 <b>تنظیم تعداد شیفت‌ها</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"تعداد فعلی: <b>{n} شیفت</b>\n\n"
-        f"عدد جدید رو بفرست (۱ تا ۲۰):\n"
-        f"<i>⚠️ اکانت‌هایی که شیفتشون از محدوده خارج بشن، "
-        f"به کم‌جمعیت‌ترین شیفت منتقل میشن.</i>",
-        parse_mode="HTML",
-        reply_markup=cancel_menu(),
-    )
-    await cb.answer()
+
 
 @router.message(_NSState.waiting)
 async def msg_set_num_shifts(msg: types.Message, state: FSMContext):
