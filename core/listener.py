@@ -386,6 +386,16 @@ class GroupListener:
         if not POOL._initialized:
             await POOL.init()
 
+        # ── scheduler شیفت — تنها نقطه‌ای که باید start بشه ──
+        try:
+            from core.scheduler import get_scheduler_instance
+            _sched = get_scheduler_instance()
+            _sched.start()
+            self._scheduler = _sched
+            db.debug_log("group_listener", "scheduler", "OK", "shift rotation started")
+        except Exception as _se:
+            db.debug_log("group_listener", "scheduler", "ERROR", str(_se))
+
         for i in range(self.num_workers):
             self.workers.append(asyncio.create_task(self._worker(i)))
         self._warm_task = asyncio.create_task(self._warm_loop())
