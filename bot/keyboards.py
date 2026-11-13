@@ -174,6 +174,19 @@ def shift_timing_menu() -> InlineKeyboardMarkup:
     return b.as_markup()
 
 
+def num_shifts_menu(current: int) -> InlineKeyboardMarkup:
+    """منوی تغییر تعداد شیفت‌ها با دکمه‌های + و -"""
+    b = InlineKeyboardBuilder()
+    if current > 1:
+        b.button(text=f"➖ کم کردن  ({current - 1})", callback_data=f"ns:set:{current - 1}")
+    if current < 20:
+        b.button(text=f"➕ اضافه کردن  ({current + 1})", callback_data=f"ns:set:{current + 1}")
+    b.button(text="🔄 توزیع مجدد اکانت‌ها", callback_data="ns:redistribute")
+    b.button(text="🔙 برگشت به تنظیمات", callback_data="menu:settings")
+    b.adjust(2, 1, 1)
+    return b.as_markup()
+
+
 def shift_select_menu(current: int, num_shifts: int = 0) -> InlineKeyboardMarkup:
     """منوی انتخاب شیفت فعال (داینامیک) + حالت همه شیفت‌ها (0)"""
     if num_shifts <= 0:
@@ -204,16 +217,4 @@ def confirm_menu(action: str) -> InlineKeyboardMarkup:
 def cancel_menu() -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
     b.button(text="❌ انصراف", callback_data="add:cancel")
-    return b.as_markup()
-
-
-def num_shifts_confirm_menu(new_n: int, current_n: int) -> InlineKeyboardMarkup:
-    """تأیید تغییر تعداد شیفت + redistribute خودکار"""
-    b = InlineKeyboardBuilder()
-    b.button(
-        text=f"✅ تأیید ({current_n} → {new_n} شیفت)",
-        callback_data=f"nsh:confirm:{new_n}",
-    )
-    b.button(text="❌ لغو", callback_data="nsh:cancel")
-    b.adjust(1)
     return b.as_markup()

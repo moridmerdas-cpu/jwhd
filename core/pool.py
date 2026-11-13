@@ -222,46 +222,12 @@ class ClientPool:
             return list(self.all_phones)
         return self.shifts.get(self.active_shift, [])
 
-    def shift_all_flooded(self, shift_num: int) -> bool:
-        """True اگه همه اکانت‌های شیفت مورد نظر در حالت flood باشن."""
-        phones = self.shifts.get(shift_num, [])
-        if not phones:
-            return False   # شیفت خالی = flood نیست، رد نشه
-        from datetime import datetime, timezone
-        now_iso = datetime.now(timezone.utc).isoformat()
-        sb = db._get_client()
-        res = sb.table("accounts") \
-                .select("phone, status, flood_until") \
-                .in_("phone", phones) \
-                .execute()
-        rows = res.data or []
-        if not rows:
-            return False
-        for r in rows:
-            st = r.get("status", "")
-            fu = r.get("flood_until")
-            # اکانتی که flood نیست یا flood_until گذشته = شیفت قابل استفاده‌ست
-            if st != "flood":
-                return False
-            if fu and fu < now_iso:
-                return False
-        return True   # همه flood هستن
-
-    def swap_cycle(self) -> int:
-        """چرخش شیفت — شیفت‌های all-flood رو رد می‌کنه (حداکثر num_shifts-1 بار)."""
+    def swap_cycle(self):
+        """چرخش شیفت — اگه حالت همه شیفت‌ها (0) فعاله، چرخش نمیشه."""
         if self.active_shift == 0:
-            return 0
-        attempts = 0
-        candidate = self.active_shift
-        while attempts < self.num_shifts:
-            candidate = (candidate % self.num_shifts) + 1
-            attempts += 1
-            if not self.shift_all_flooded(candidate):
-                break
-            db.debug_log("pool", "swap_cycle", "SKIP",
-                         f"شیفت {candidate} همه flood — رد شد")
-        # حتی اگه همه flood بودن، به آخرین candidate برو (بهتر از هیچی)
-        self.active_shift = candidate
+            return 0   # حالت all-shifts: scheduler دست نمیزنه
+        self.active_shift = (self.active_shift % self.num_shifts) + 1
+        # ذخیره در DB تا بعد از ری‌استارت هم شیفت درست لود بشه
         try:
             db.set_setting("active_shift", self.active_shift)
         except Exception as e:
@@ -306,13 +272,9 @@ class ClientPool:
             await asyncio.wait_for(self.ready.wait(), timeout=30)
         except asyncio.TimeoutError:
             pass
-
-        # شیفت اکانت رو از DB بخون
         row = db.get_account(phone)
         sh = int(str((row or {}).get("shift") or 1))
         sh = sh if sh in self.shifts else 1
-
-        # اضافه کردن به ساختار in-memory
         self.blacklist.discard(phone)
         if phone not in self.all_phones:
             self.all_phones.append(phone)
@@ -320,29 +282,8 @@ class ClientPool:
             if phone in v:
                 v.remove(phone)
         self.shifts[sh].append(phone)
-
-        # وصل کردن با یه کم تأخیر تا session روی دیسک flush بشه
-        await asyncio.sleep(1)
         client = await self._connect_one(phone, force=True)
-
-        if client is not None and client.is_connected():
-            # اگه شیفت اکانت همین الان فعاله (یا حالت همه‌شیفت) → online
-            # وگرنه → idle  (شیفتش بعداً فعال میشه)
-            in_active = (
-                self.active_shift == 0
-                or sh == self.active_shift
-            )
-            new_status = "online" if in_active else "idle"
-            try:
-                db.update_account_status(phone, new_status, None)
-            except Exception as _se:
-                db.debug_log("pool", "add_live_status", "WARN", f"{phone}: {_se}")
-            db.debug_log("pool", "add_live", "OK",
-                         f"{phone} → shift={sh} status={new_status} connected=True")
-        else:
-            db.debug_log("pool", "add_live", "WARN",
-                         f"{phone} → shift={sh} connect failed")
-
+        await asyncio.to_thread(self._safe_sync)
         return client
 
     async def drop(self, phone):

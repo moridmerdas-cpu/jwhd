@@ -121,11 +121,8 @@ class AccountScheduler:
                 _STATE["last_swap_at"]      = datetime.utcnow().strftime("%H:%M:%S")
                 interval = self._schedule_next()
 
-                skipped = ""
-                if new != (old % POOL.num_shifts) + 1:
-                    skipped = f" (شیفت‌های flood رد شدن)"
                 db.debug_log("scheduler", "swap", "OK",
-                             f"🔄 {old}→{new}{skipped} | +{interval}s | auto#{_STATE['swap_count']} total#{_STATE['total_swap_count']}")
+                             f"🔄 {old}→{new} | +{interval}s | auto#{_STATE['swap_count']} total#{_STATE['total_swap_count']}")
 
                 try:
                     result = await POOL.activate_shift(new)
@@ -163,11 +160,8 @@ class AccountScheduler:
         # زمان بعدی رو هم از همین لحظه دوباره بچین
         self._schedule_next()
 
-        skipped = ""
-        if new != (old % POOL.num_shifts) + 1:
-            skipped = f" (شیفت‌های flood رد شدن)"
         db.debug_log("scheduler", "rotate_now", "OK",
-                     f"🔄 manual {old}→{new}{skipped} | manual#{_STATE['manual_swap_count']} total#{_STATE['total_swap_count']}")
+                     f"🔄 manual {old}→{new} | manual#{_STATE['manual_swap_count']} total#{_STATE['total_swap_count']}")
 
         try:
             result = await POOL.activate_shift(new)
