@@ -30,9 +30,10 @@ def use_members_menu() -> InlineKeyboardMarkup:
 def robot_member_menu() -> InlineKeyboardMarkup:
     """منوی ربات ممبر گیر"""
     b = InlineKeyboardBuilder()
-    b.button(text="✅ عضویت",    callback_data="robmem:join")
-    b.button(text="🚪 ترک کردن", callback_data="robmem:leave")
-    b.button(text="🔙 برگشت",   callback_data="robmem:back")
+    b.button(text="✅ عضویت",              callback_data="robmem:join")
+    b.button(text="💎 speedy — الماس",     callback_data="robmem:speedy")
+    b.button(text="🚪 ترک کردن",           callback_data="robmem:leave")
+    b.button(text="🔙 برگشت",             callback_data="robmem:back")
     b.adjust(1)
     return b.as_markup()
 

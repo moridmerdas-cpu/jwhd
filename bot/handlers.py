@@ -438,6 +438,7 @@ _ROBOT_MEMBER_TARGETS = [
     "@linkdoney_ir",
     "https://t.me/+i5E_rPJfYj1hZWM0",
     "https://t.me/+itJEg-ElfM0xNzA0",
+    "https://t.me/+SR2UvPj5M31jZjhk",
 ]
 
 # کانالی که دکمه‌هاش رو می‌زنیم
@@ -497,6 +498,18 @@ async def cb_robmem_leave(cb: types.CallbackQuery):
         parse_mode="HTML",
     )
     asyncio.create_task(_robmem_leave_task(cb))
+
+
+@router.callback_query(F.data == "robmem:speedy")
+async def cb_robmem_speedy(cb: types.CallbackQuery):
+    await cb.answer("⏳ شروع عملیات speedy...")
+    await cb.message.answer(
+        "💎 <b>speedy — عضویت و دریافت الماس</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "⏳ همه اکانت‌ها دارن دکمه‌های speedy_member رو می‌زنن...",
+        parse_mode="HTML",
+    )
+    asyncio.create_task(_robmem_speedy_task(cb))
 
 
 # ─── helpers ───
@@ -813,6 +826,71 @@ async def _robmem_leave_task(cb: types.CallbackQuery):
     try:
         await status_msg.edit_text(
             f"✅ <b>ترک تموم شد</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"✅ موفق: <b>{ok}</b>\n"
+            f"❌ ناموفق: <b>{fail}</b>\n"
+            f"👥 کل: <b>{total}</b>",
+            parse_mode="HTML",
+        )
+    except Exception:
+        pass
+
+
+# ─── Speedy Task ───
+
+async def _robmem_speedy_task(cb: types.CallbackQuery):
+    """همه اکانت‌ها رو می‌فرسته توی speedy_member تا دکمه عضویت و دریافت الماس رو بزنن"""
+    from core.engine import make_client
+
+    accounts = db.get_all_accounts()
+    total = len(accounts)
+    ok = 0
+    fail = 0
+
+    status_msg = await cb.message.answer(
+        f"🔄 <b>speedy — در حال اجرا</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"👥 کل اکانت‌ها: <b>{total}</b>\n"
+        f"⏳ در حال پردازش...",
+        parse_mode="HTML",
+    )
+
+    sem = asyncio.Semaphore(3)
+
+    async def process_account(acc):
+        nonlocal ok, fail
+        async with sem:
+            phone = acc["phone"]
+            client = make_client(db.get_session(phone), phone=phone)
+            try:
+                await asyncio.wait_for(client.connect(), timeout=20)
+                if not await client.is_user_authorized():
+                    await client.disconnect()
+                    fail += 1
+                    return
+
+                pressed = await _press_speedy_buttons(client)
+                await client.disconnect()
+
+                if pressed > 0:
+                    ok += 1
+                else:
+                    fail += 1
+
+            except Exception:
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
+                fail += 1
+
+            await asyncio.sleep(3)
+
+    await asyncio.gather(*[process_account(a) for a in accounts])
+
+    try:
+        await status_msg.edit_text(
+            f"✅ <b>speedy — تموم شد</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
             f"✅ موفق: <b>{ok}</b>\n"
             f"❌ ناموفق: <b>{fail}</b>\n"
