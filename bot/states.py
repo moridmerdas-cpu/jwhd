@@ -16,5 +16,10 @@ class SetGroup(StatesGroup):
 
 
 class UseMembers(StatesGroup):
-    waiting_start_bot_link  = State()   # انتظار لینک دعوت ربات هدف
-    waiting_join_group_link = State()   # انتظار لینک/آیدی گروه هدف
+    waiting_start_bot_link  = State()
+    waiting_join_group_link = State()
+
+
+# ── NEW ──────────────────────────────────────────────────────
+class SetNumShifts(StatesGroup):
+    waiting_count = State()

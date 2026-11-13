@@ -1291,20 +1291,25 @@ async def cb_settings(cb: types.CallbackQuery, state: FSMContext):
 
     elif data == "num_shifts":
         from core.pool import POOL
+        from aiogram.utils.keyboard import InlineKeyboardBuilder as _IKB
         mn = int(db.get_setting("shift_min_sec", Config.SHIFT_MIN_SEC)) // 60
         mx = int(db.get_setting("shift_max_sec", Config.SHIFT_MAX_SEC)) // 60
         shift_lines = "\n".join(
             f"  شیفت {i}: <b>{len(POOL.shifts.get(i, []))}</b> اکانت"
             for i in range(1, POOL.num_shifts + 1)
         )
+        kb = _IKB()
+        kb.button(text="➕ تغییر تعداد شیفت‌ها", callback_data="nsh:start")
+        kb.button(text="🔙 برگشت به تنظیمات",    callback_data="menu:settings")
+        kb.adjust(1)
         await cb.message.edit_text(
             f"🔢 <b>تعداد شیفت‌ها</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
             f"📋 شیفت‌های فعال: <b>{POOL.num_shifts}</b>\n"
             f"⏱️ بازه چرخش: <b>{mn}-{mx} دقیقه</b>\n\n"
             f"{shift_lines}\n\n"
-            f"💡 اکانت‌ها رو از منوی اکانت‌ها به شیفت‌های مختلف اختصاص بده.",
-            reply_markup=_back_to_settings_kb(),
+            f"💡 با افزودن شیفت، اکانت‌ها خودکار بین شیفت‌های جدید تقسیم می‌شن.",
+            reply_markup=kb.as_markup(),
             parse_mode="HTML",
         )
 
@@ -2033,6 +2038,114 @@ async def vg_set_gap(msg: types.Message, state: FSMContext):
         reply_markup=main_menu(), parse_mode="HTML",
     )
     await state.clear()
+
+
+# ════════════════════════════════════════════════════════════════
+#  تغییر تعداد شیفت‌ها — FSM
+# ════════════════════════════════════════════════════════════════
+from bot.states import SetNumShifts
+from bot.keyboards import num_shifts_confirm_menu
+
+
+@router.callback_query(F.data == "nsh:start")
+async def cb_nsh_start(cb: types.CallbackQuery, state: FSMContext):
+    from core.pool import POOL
+    await state.set_state(SetNumShifts.waiting_count)
+    await state.update_data(msg_id=cb.message.message_id)
+    await cb.message.edit_text(
+        f"🔢 <b>تعداد شیفت جدید</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"شیفت‌های فعلی: <b>{POOL.num_shifts}</b>\n\n"
+        f"یک عدد بین <b>1</b> تا <b>20</b> بفرست:\n"
+        f"(اکانت‌ها خودکار توزیع می‌شن)",
+        parse_mode="HTML",
+    )
+    await cb.answer()
+
+
+@router.message(SetNumShifts.waiting_count)
+async def msg_nsh_count(msg: types.Message, state: FSMContext):
+    from core.pool import POOL
+    raw = (msg.text or "").strip()
+    _fa = str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789")
+    raw = raw.translate(_fa)
+    if not raw.isdigit():
+        await msg.answer("❌ فقط عدد وارد کن.")
+        return
+    n = int(raw)
+    if not (1 <= n <= 20):
+        await msg.answer("❌ عدد باید بین ۱ تا ۲۰ باشه.")
+        return
+    if n == POOL.num_shifts:
+        await state.clear()
+        await msg.answer(
+            f"ℹ️ تعداد شیفت‌ها همین الان <b>{n}</b> تاست. تغییری نداد.",
+            parse_mode="HTML",
+        )
+        return
+    total = len(POOL.all_phones)
+    per_shift = total // n if n else 0
+    rem = total % n if n else 0
+    preview = "\n".join(
+        f"  شیفت {i}: ~<b>{per_shift + (1 if i <= rem else 0)}</b> اکانت"
+        for i in range(1, min(n + 1, 11))
+    )
+    if n > 10:
+        preview += f"\n  ... تا شیفت {n}"
+    await state.update_data(new_n=n)
+    await msg.answer(
+        f"🔄 <b>پیش‌نمایش توزیع</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"کل اکانت: <b>{total}</b>\n"
+        f"شیفت‌های جدید: <b>{n}</b>\n\n"
+        f"{preview}\n\n"
+        f"⚠️ اکانت‌هایی که شیفتشون از محدوده خارجه\n"
+        f"خودکار به کم‌جمعیت‌ترین شیفت منتقل می‌شن.\n\n"
+        f"تأیید می‌کنی؟",
+        reply_markup=num_shifts_confirm_menu(n, POOL.num_shifts),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data.startswith("nsh:confirm:"))
+async def cb_nsh_confirm(cb: types.CallbackQuery, state: FSMContext):
+    from core.pool import POOL
+    await state.clear()
+    new_n = int(cb.data.split(":")[2])
+    old_n = POOL.num_shifts
+    POOL.set_num_shifts(new_n)
+    if POOL.active_shift not in (0, *range(1, new_n + 1)):
+        POOL.active_shift = 1
+        db.set_setting("active_shift", "1")
+    shift_lines = "\n".join(
+        f"  شیفت {i}: <b>{len(POOL.shifts.get(i, []))}</b> اکانت"
+        for i in range(1, new_n + 1)
+    )
+    from aiogram.utils.keyboard import InlineKeyboardBuilder as _IKB
+    kb = _IKB()
+    kb.button(text="🔙 برگشت به تنظیمات", callback_data="menu:settings")
+    kb.adjust(1)
+    await cb.message.edit_text(
+        f"✅ <b>تعداد شیفت‌ها تغییر کرد</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"قبلاً: <b>{old_n}</b> → الان: <b>{new_n}</b>\n\n"
+        f"<b>توزیع جدید:</b>\n{shift_lines}\n\n"
+        f"✅ Supabase آپدیت شد.",
+        reply_markup=kb.as_markup(),
+        parse_mode="HTML",
+    )
+    await cb.answer("✅ شیفت‌ها آپدیت شدن", show_alert=False)
+
+
+@router.callback_query(F.data == "nsh:cancel")
+async def cb_nsh_cancel(cb: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    from aiogram.utils.keyboard import InlineKeyboardBuilder as _IKB
+    kb = _IKB()
+    kb.button(text="🔙 برگشت به تنظیمات", callback_data="menu:settings")
+    kb.adjust(1)
+    await cb.message.edit_text("❌ لغو شد.", reply_markup=kb.as_markup())
+    await cb.answer()
 
 
 def register_handlers(dp):

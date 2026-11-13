@@ -205,3 +205,15 @@ def cancel_menu() -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
     b.button(text="❌ انصراف", callback_data="add:cancel")
     return b.as_markup()
+
+
+def num_shifts_confirm_menu(new_n: int, current_n: int) -> InlineKeyboardMarkup:
+    """تأیید تغییر تعداد شیفت + redistribute خودکار"""
+    b = InlineKeyboardBuilder()
+    b.button(
+        text=f"✅ تأیید ({current_n} → {new_n} شیفت)",
+        callback_data=f"nsh:confirm:{new_n}",
+    )
+    b.button(text="❌ لغو", callback_data="nsh:cancel")
+    b.adjust(1)
+    return b.as_markup()
