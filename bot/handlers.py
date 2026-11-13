@@ -18,7 +18,7 @@ from bot.keyboards import (
     main_menu, status_menu, accounts_menu, accounts_list_kb,
     stats_menu, settings_menu, group_menu, confirm_menu,
     cancel_menu, view_toggle_menu, shift_select_menu, shift_timing_menu,
-    use_members_menu,
+    use_members_menu, robot_member_menu,
 )
 from bot.states import AddAccount, SetShiftTiming, SetGroup, UseMembers
 
@@ -424,6 +424,405 @@ async def _check_group_join_task(cb: types.CallbackQuery, group_id):
 
 
 # ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────
+# 🤖 ربات ممبر گیر — عضویت و ترک لینک‌های ثابت
+# ─────────────────────────────────────────────────────────
+
+import re as _re
+
+# لینک‌های هدف
+_ROBOT_MEMBER_TARGETS = [
+    "@freeads_org",
+    "@cheallesh",
+    "@speedy_member",
+    "@linkdoney_ir",
+    "https://t.me/+i5E_rPJfYj1hZWM0",
+    "https://t.me/+itJEg-ElfM0xNzA0",
+]
+
+# کانالی که دکمه‌هاش رو می‌زنیم
+_SPEEDY_CHANNEL = "@speedy_member"
+
+# تعداد پیام‌هایی که دکمه «عضویت» و «دریافت الماس» روشون می‌زنیم
+_SPEEDY_MSG_COUNT = 3
+
+
+@router.callback_query(F.data == "mem:robot_member")
+async def cb_robot_member_menu(cb: types.CallbackQuery):
+    await cb.answer()
+    total = len(db.get_all_accounts())
+    targets_text = "\n".join(f"  • <code>{t}</code>" for t in _ROBOT_MEMBER_TARGETS)
+    await cb.message.answer(
+        f"🤖 <b>ربات ممبر گیر</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"👥 تعداد اکانت‌های موجود: <b>{total}</b>\n\n"
+        f"🎯 <b>لینک‌های هدف:</b>\n{targets_text}\n\n"
+        f"یه عملیات انتخاب کن:",
+        reply_markup=robot_member_menu(),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data == "robmem:back")
+async def cb_robmem_back(cb: types.CallbackQuery):
+    await cb.answer()
+    total = len(db.get_all_accounts())
+    await cb.message.answer(
+        f"🤖 <b>استفاده از ممبرها</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"👥 تعداد اکانت‌های موجود: <b>{total}</b>\n\n"
+        f"یکی از عملیات‌ها رو انتخاب کن:",
+        reply_markup=use_members_menu(),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data == "robmem:join")
+async def cb_robmem_join(cb: types.CallbackQuery):
+    await cb.answer("⏳ شروع عضویت...")
+    await cb.message.answer(
+        "⏳ <b>شروع عضویت در لینک‌های هدف...</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        parse_mode="HTML",
+    )
+    asyncio.create_task(_robmem_join_task(cb))
+
+
+@router.callback_query(F.data == "robmem:leave")
+async def cb_robmem_leave(cb: types.CallbackQuery):
+    await cb.answer("⏳ شروع ترک کردن...")
+    await cb.message.answer(
+        "⏳ <b>شروع ترک لینک‌های هدف...</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        parse_mode="HTML",
+    )
+    asyncio.create_task(_robmem_leave_task(cb))
+
+
+# ─── helpers ───
+
+async def _robmem_join_one_target(client, target: str) -> str:
+    """یه لینک رو join می‌کنه — برمی‌گردونه JOINED / ALREADY / ERR:..."""
+    from telethon import functions as tl_funcs
+    from telethon.errors import UserAlreadyParticipantError, FloodWaitError
+
+    invite_match = _re.search(r"(?:joinchat/|\+)([A-Za-z0-9_\-]+)", target)
+    try:
+        if invite_match:
+            hash_ = invite_match.group(1)
+            await asyncio.wait_for(
+                client(tl_funcs.messages.ImportChatInviteRequest(hash=hash_)),
+                timeout=20,
+            )
+        else:
+            username = target.lstrip("@").strip()
+            if username.startswith("https://t.me/"):
+                username = username.replace("https://t.me/", "").strip("/")
+            entity = await asyncio.wait_for(client.get_entity(username), timeout=10)
+            await asyncio.wait_for(
+                client(tl_funcs.channels.JoinChannelRequest(channel=entity)),
+                timeout=20,
+            )
+        return "JOINED"
+    except UserAlreadyParticipantError:
+        return "ALREADY"
+    except FloodWaitError as e:
+        await asyncio.sleep(min(e.seconds, 30))
+        return f"FLOOD:{e.seconds}"
+    except Exception as e:
+        return f"ERR:{type(e).__name__}"
+
+
+async def _robmem_leave_one_target(client, target: str) -> str:
+    """از یه کانال/گروه leave می‌کنه — برمی‌گردونه LEFT / NOT_MEMBER / ERR:..."""
+    from telethon import functions as tl_funcs
+    from telethon.errors import UserNotParticipantError
+
+    try:
+        invite_match = _re.search(r"(?:joinchat/|\+)([A-Za-z0-9_\-]+)", target)
+        if invite_match:
+            # برای invite link باید اول entity رو بگیریم
+            hash_ = invite_match.group(1)
+            # سعی می‌کنیم channel رو از طریق hash پیدا کنیم
+            try:
+                result = await asyncio.wait_for(
+                    client(tl_funcs.messages.CheckChatInviteRequest(hash=hash_)),
+                    timeout=10,
+                )
+                # اگه already عضو بودیم chat رو داریم
+                if hasattr(result, "chat"):
+                    entity = result.chat
+                else:
+                    return "NOT_MEMBER"
+            except Exception:
+                return "NOT_MEMBER"
+        else:
+            username = target.lstrip("@").strip()
+            if username.startswith("https://t.me/"):
+                username = username.replace("https://t.me/", "").strip("/")
+            entity = await asyncio.wait_for(client.get_entity(username), timeout=10)
+
+        await asyncio.wait_for(
+            client(tl_funcs.channels.LeaveChannelRequest(channel=entity)),
+            timeout=20,
+        )
+        return "LEFT"
+    except UserNotParticipantError:
+        return "NOT_MEMBER"
+    except Exception as e:
+        return f"ERR:{type(e).__name__}"
+
+
+async def _press_speedy_buttons(client) -> int:
+    """
+    توی کانال speedy_member آخرین _SPEEDY_MSG_COUNT پیام با دکمه رو پیدا می‌کنه.
+    برای هر پیام:
+      1. دکمه «عضویت» رو می‌زنه
+      2. لینکی که توی پاسخ اومد رو join می‌کنه
+      3. دکمه «دریافت الماس» رو می‌زنه
+    برمی‌گردونه تعداد پیام‌هایی که پردازش شدن.
+    """
+    from telethon import functions as tl_funcs
+
+    try:
+        channel = await asyncio.wait_for(
+            client.get_entity(_SPEEDY_CHANNEL), timeout=10
+        )
+    except Exception:
+        return 0
+
+    try:
+        messages = await asyncio.wait_for(
+            client.get_messages(channel, limit=30), timeout=15
+        )
+    except Exception:
+        return 0
+
+    button_msgs = [
+        m for m in messages
+        if m.reply_markup and hasattr(m.reply_markup, "rows")
+    ][:_SPEEDY_MSG_COUNT]
+
+    processed = 0
+    for msg in button_msgs:
+        try:
+            rows = msg.reply_markup.rows
+            all_btns = [btn for row in rows for btn in row.buttons]
+
+            join_btn = None
+            diamond_btn = None
+            for btn in all_btns:
+                txt = getattr(btn, "text", "") or ""
+                if any(k in txt for k in ("عضویت", "عضو", "join", "Join")):
+                    join_btn = btn
+                if any(k in txt for k in ("الماس", "diamond", "دریافت", "Diamond")):
+                    diamond_btn = btn
+
+            # زدن دکمه عضویت
+            if join_btn and getattr(join_btn, "data", None):
+                try:
+                    answer = await asyncio.wait_for(
+                        client(tl_funcs.messages.GetBotCallbackAnswerRequest(
+                            peer=channel,
+                            msg_id=msg.id,
+                            data=join_btn.data,
+                        )),
+                        timeout=15,
+                    )
+                    # اگه توی پاسخ لینک بود join کن
+                    if answer and getattr(answer, "url", None):
+                        url = answer.url
+                        inv = _re.search(r"(?:joinchat/|\+)([A-Za-z0-9_\-]+)", url)
+                        if inv:
+                            try:
+                                await asyncio.wait_for(
+                                    client(tl_funcs.messages.ImportChatInviteRequest(
+                                        hash=inv.group(1)
+                                    )),
+                                    timeout=20,
+                                )
+                            except Exception:
+                                pass
+                        elif "t.me/" in url:
+                            uname = url.split("t.me/")[-1].strip("/")
+                            try:
+                                ent = await asyncio.wait_for(
+                                    client.get_entity(uname), timeout=10
+                                )
+                                await asyncio.wait_for(
+                                    client(tl_funcs.channels.JoinChannelRequest(channel=ent)),
+                                    timeout=20,
+                                )
+                            except Exception:
+                                pass
+                    await asyncio.sleep(2)
+                except Exception:
+                    pass
+
+            # زدن دکمه دریافت الماس
+            if diamond_btn and getattr(diamond_btn, "data", None):
+                try:
+                    await asyncio.wait_for(
+                        client(tl_funcs.messages.GetBotCallbackAnswerRequest(
+                            peer=channel,
+                            msg_id=msg.id,
+                            data=diamond_btn.data,
+                        )),
+                        timeout=15,
+                    )
+                    await asyncio.sleep(2)
+                except Exception:
+                    pass
+
+            processed += 1
+        except Exception:
+            continue
+
+    return processed
+
+
+# ─── Join Task ───
+
+async def _robmem_join_task(cb: types.CallbackQuery):
+    from core.engine import make_client
+
+    accounts = db.get_all_accounts()
+    total = len(accounts)
+    ok = 0
+    fail = 0
+
+    status_msg = await cb.message.answer(
+        f"🔄 <b>عضویت در حال اجرا</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"👥 کل اکانت‌ها: <b>{total}</b>\n"
+        f"⏳ در حال پردازش...",
+        parse_mode="HTML",
+    )
+
+    sem = asyncio.Semaphore(3)
+
+    async def process_account(acc):
+        nonlocal ok, fail
+        async with sem:
+            phone = acc["phone"]
+            client = make_client(db.get_session(phone), phone=phone)
+            acc_ok = True
+            try:
+                await asyncio.wait_for(client.connect(), timeout=20)
+                if not await client.is_user_authorized():
+                    await client.disconnect()
+                    fail += 1
+                    return
+
+                # عضویت در همه لینک‌ها
+                for target in _ROBOT_MEMBER_TARGETS:
+                    res = await _robmem_join_one_target(client, target)
+                    if res.startswith("ERR"):
+                        acc_ok = False
+                    await asyncio.sleep(2)
+
+                # زدن دکمه‌های speedy_member
+                await _press_speedy_buttons(client)
+
+                await client.disconnect()
+                if acc_ok:
+                    ok += 1
+                else:
+                    fail += 1
+
+            except Exception:
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
+                fail += 1
+
+            await asyncio.sleep(3)
+
+    await asyncio.gather(*[process_account(a) for a in accounts])
+
+    try:
+        await status_msg.edit_text(
+            f"✅ <b>عضویت تموم شد</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"✅ موفق: <b>{ok}</b>\n"
+            f"❌ ناموفق: <b>{fail}</b>\n"
+            f"👥 کل: <b>{total}</b>",
+            parse_mode="HTML",
+        )
+    except Exception:
+        pass
+
+
+# ─── Leave Task ───
+
+async def _robmem_leave_task(cb: types.CallbackQuery):
+    from core.engine import make_client
+
+    accounts = db.get_all_accounts()
+    total = len(accounts)
+    ok = 0
+    fail = 0
+
+    status_msg = await cb.message.answer(
+        f"🔄 <b>ترک در حال اجرا</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"👥 کل اکانت‌ها: <b>{total}</b>\n"
+        f"⏳ در حال پردازش...",
+        parse_mode="HTML",
+    )
+
+    sem = asyncio.Semaphore(5)
+
+    async def leave_account(acc):
+        nonlocal ok, fail
+        async with sem:
+            phone = acc["phone"]
+            client = make_client(db.get_session(phone), phone=phone)
+            acc_ok = True
+            try:
+                await asyncio.wait_for(client.connect(), timeout=20)
+                if not await client.is_user_authorized():
+                    await client.disconnect()
+                    fail += 1
+                    return
+
+                for target in _ROBOT_MEMBER_TARGETS:
+                    res = await _robmem_leave_one_target(client, target)
+                    if res.startswith("ERR"):
+                        acc_ok = False
+                    await asyncio.sleep(1.5)
+
+                await client.disconnect()
+                if acc_ok:
+                    ok += 1
+                else:
+                    fail += 1
+
+            except Exception:
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
+                fail += 1
+
+            await asyncio.sleep(2)
+
+    await asyncio.gather(*[leave_account(a) for a in accounts])
+
+    try:
+        await status_msg.edit_text(
+            f"✅ <b>ترک تموم شد</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"✅ موفق: <b>{ok}</b>\n"
+            f"❌ ناموفق: <b>{fail}</b>\n"
+            f"👥 کل: <b>{total}</b>",
+            parse_mode="HTML",
+        )
+    except Exception:
+        pass
+
+
 # 🤖 استفاده از ممبرها
 # ─────────────────────────────────────────────────────────
 
