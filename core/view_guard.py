@@ -182,7 +182,7 @@ def _load_settings_from_db():
     """تنظیمات ذخیره‌شده رو از db بخونه (بعد از import db امن است)"""
     global MAX_VIEWS_PER_DAY, MIN_GAP_SEC, MAX_GAP_SEC
     try:
-        from core.db import db
+        from models import database as db
         v = db.get_setting("vg_max_views_per_day", None)
         if v is not None:
             MAX_VIEWS_PER_DAY = int(v)

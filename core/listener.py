@@ -237,17 +237,25 @@ class MultiTargetListener:
         random.shuffle(eligible)
         n = len(eligible)
 
-        # پنجره زمانی طبیعی: هر اکانت با فاصله کافی از قبلی
-        # به جای پخش یکنواخت، از توزیع نامنظم استفاده میکنیم
-        window = random.uniform(
-            max(n * 0.3, 3.0),   # حداقل ۳ ثانیه یا ۳۰۰ms/اکانت
-            max(n * 0.8, 8.0)    # حداکثر ۸ ثانیه یا ۸۰۰ms/اکانت
+        # پنجره زمانی: حداکثر MAX_POST_AGE - 8 ثانیه مارجین داریم
+        # وگرنه اکانت‌های نیمه‌دوم بعد از delay تایم‌اوت می‌خورن
+        max_window = max(MAX_POST_AGE - 8, 5.0)
+        window = min(
+            random.uniform(
+                max(n * 0.3, 3.0),
+                max(n * 0.8, 8.0)
+            ),
+            max_window
         )
         t0 = _time.time()
 
         async def one(phone, delay):
             if delay > 0:
                 await asyncio.sleep(delay)
+            # re-check بعد از delay — ممکنه وضعیت عوض شده باشه
+            ok, wait = VIEW_GUARD.can_view(phone, msg_id)
+            if not ok:
+                return ("WAIT" if wait > 0 else "SKIP", phone)
             return await self._view_one(phone, msg_id)
 
         tasks = []
@@ -643,23 +651,40 @@ class GroupListener:
         if not phones:
             self.stats["last_round"] = f"ID={msg_id} | شیفت فعال اکانتی نداره"
             return 0, 0, Counter()
-        random.shuffle(phones)
-        n      = len(phones)
-        window = random.uniform(1.5, 2.5)
+
+        # فقط اکانت‌هایی که ViewGuard اجازه میده (flood نیستن، سهمیه دارن، تکراری نیستن)
+        eligible = VIEW_GUARD.eligible_phones(phones, msg_id)
+        skipped_guard = len(phones) - len(eligible)
+        if not eligible:
+            db.debug_log("group_listener", "read_done", "SKIP",
+                         f"ID={msg_id} | w{wid} | همه skip (ViewGuard) | skip:{skipped_guard}")
+            self.stats["last_round"] = f"ID={msg_id} | 0/{len(phones)} | همه ViewGuard skip"
+            return 0, 0, Counter()
+
+        random.shuffle(eligible)
+        n = len(eligible)
+
+        # window باید از MAX_GROUP_MSG_AGE کمتر باشه — وگرنه نیمه‌دوم timeout می‌خوره
+        max_window = max(self.MAX_GROUP_MSG_AGE - 10, 5.0)
+        window = min(random.uniform(1.5, max(n * 0.08, 2.5)), max_window)
         t0     = _time.time()
 
         async def one(phone, delay):
             if delay > 0:
                 await asyncio.sleep(delay)
+            # re-check بعد از delay
+            ok, wait = VIEW_GUARD.can_view(phone, msg_id)
+            if not ok:
+                return ("WAIT" if wait > 0 else "SKIP", phone)
             return await self._read_one(phone, msg_id)
 
         tasks = [
-            asyncio.create_task(one(phone, (i / max(n, 1)) * window + random.uniform(0, 0.15)))
-            for i, phone in enumerate(phones)
+            asyncio.create_task(one(phone, (i / max(n, 1)) * window + random.uniform(0, 0.08)))
+            for i, phone in enumerate(eligible)
         ]
         try:
             results = await asyncio.wait_for(
-                asyncio.gather(*tasks, return_exceptions=True), timeout=window + 10)
+                asyncio.gather(*tasks, return_exceptions=True), timeout=window + 8)
         except asyncio.TimeoutError:
             results = []
             for t in tasks:
@@ -678,9 +703,9 @@ class GroupListener:
         elapsed = _time.time() - t0
         summary = " | ".join(f"{k}={v}" for k, v in reasons.most_common(5))
         self.stats["rounds"] += 1
-        self.stats["last_round"] = f"ID={msg_id} | {suc}/{n} | {elapsed:.1f}s | {summary}"
+        self.stats["last_round"] = f"ID={msg_id} | {suc}/{n} | skip:{skipped_guard} | {elapsed:.1f}s | {summary}"
         db.debug_log("group_listener", "read_done", "RESULT",
-                     f"ID={msg_id} | w{wid} | {suc}/{n} | {elapsed:.1f}s | {summary} | q:{self.queue.qsize()}")
+                     f"ID={msg_id} | w{wid} | {suc}/{n} | skip:{skipped_guard} | {elapsed:.1f}s | {summary} | q:{self.queue.qsize()}")
         return suc, n, reasons
 
     # ───────────────── تشخیص و تست ─────────────────

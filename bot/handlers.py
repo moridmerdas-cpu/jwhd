@@ -1379,18 +1379,20 @@ async def cb_ns_set(cb: types.CallbackQuery):
     old = POOL.num_shifts
     POOL.set_num_shifts(n)
 
-    # توزیع مجدد round-robin اکانت‌ها روی شیفت‌های جدید
+    # توزیع round-robin اکانت‌ها روی شیفت‌های جدید
     phones = list(POOL.all_phones)
     new_buckets = {i: [] for i in range(1, n + 1)}
     for idx, phone in enumerate(phones):
-        bucket = (idx % n) + 1
-        new_buckets[bucket].append(phone)
-        db.update_account_shift(phone, str(bucket))
-    POOL.shifts = new_buckets
+        new_buckets[(idx % n) + 1].append(phone)
+    # apply_distribution: یه جا shifts رو set می‌کنه و DB رو sync می‌کنه
+    POOL.apply_distribution(new_buckets)
+
+    # reconnect همه اکانت‌ها — شیفت 0 یعنی force-reconnect همه
+    await POOL.reconnect_shift(0)
 
     await cb.answer(
         f"✅ تعداد شیفت‌ها از {old} به {n} تغییر کرد\n"
-        f"👥 {len(phones)} اکانت توزیع شد",
+        f"👥 {len(phones)} اکانت توزیع و reconnect شد",
         show_alert=True,
     )
     try:
@@ -1415,13 +1417,12 @@ async def cb_ns_redistribute(cb: types.CallbackQuery):
     phones = list(POOL.all_phones)
     new_buckets = {i: [] for i in range(1, n + 1)}
     for idx, phone in enumerate(phones):
-        bucket = (idx % n) + 1
-        new_buckets[bucket].append(phone)
-        db.update_account_shift(phone, str(bucket))
-    POOL.shifts = new_buckets
+        new_buckets[(idx % n) + 1].append(phone)
+    POOL.apply_distribution(new_buckets)
+    await POOL.reconnect_shift(POOL.active_shift)
 
     await cb.answer(
-        f"✅ {len(phones)} اکانت روی {n} شیفت توزیع شد",
+        f"✅ {len(phones)} اکانت روی {n} شیفت توزیع و reconnect شد",
         show_alert=True,
     )
     try:
