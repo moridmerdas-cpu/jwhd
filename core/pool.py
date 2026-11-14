@@ -67,13 +67,17 @@ class ClientPool:
     def apply_distribution(self, new_buckets: dict):
         """توزیع جدید اکانت‌ها رو اعمال می‌کنه و DB رو sync می‌کنه.
         new_buckets: {shift_num: [phone, ...]}
-        این تنها جایی‌ه که self.shifts آپدیت میشه — از handler صدا زده میشه."""
+        این تنها جایی‌ه که self.shifts آپدیت میشه — از handler صدا زده میشه.
+        all_phones هم rebuild میشه تا active_shift=0 همه اکانت‌ها رو ببینه."""
         self.shifts = new_buckets
+        # all_phones رو از buckets rebuild کن — ترتیب شیفت‌ها حفظ میشه
+        self.all_phones = [p for sh in sorted(new_buckets) for p in new_buckets[sh]]
         for sh, phones in new_buckets.items():
             for phone in phones:
                 db.update_account_shift(phone, str(sh))
         db.debug_log("pool", "apply_distribution", "OK",
-                     " ".join(f"S{k}:{len(v)}" for k, v in new_buckets.items()))
+                     f"total:{len(self.all_phones)} " +
+                     " ".join(f"S{k}:{len(v)}" for k, v in sorted(new_buckets.items())))
 
     async def reconnect_shift(self, shift: int):
         """اکانت‌های یه شیفت خاص رو force-reconnect می‌کنه.

@@ -1384,17 +1384,18 @@ async def cb_ns_set(cb: types.CallbackQuery):
     new_buckets = {i: [] for i in range(1, n + 1)}
     for idx, phone in enumerate(phones):
         new_buckets[(idx % n) + 1].append(phone)
-    # apply_distribution: یه جا shifts رو set می‌کنه و DB رو sync می‌کنه
     POOL.apply_distribution(new_buckets)
 
-    # reconnect همه اکانت‌ها — شیفت 0 یعنی force-reconnect همه
-    await POOL.reconnect_shift(0)
-
+    # cb.answer باید قبل از کار سنگین صدا زده بشه — Telegram query 10s expire میشه
     await cb.answer(
         f"✅ تعداد شیفت‌ها از {old} به {n} تغییر کرد\n"
-        f"👥 {len(phones)} اکانت توزیع و reconnect شد",
+        f"👥 {len(phones)} اکانت توزیع شد — در حال reconnect...",
         show_alert=True,
     )
+
+    # reconnect بعد از answer — در background انجام میشه
+    asyncio.create_task(POOL.reconnect_shift(0))
+
     try:
         await cb.message.edit_text(
             _build_num_shifts_text(POOL),
@@ -1419,12 +1420,12 @@ async def cb_ns_redistribute(cb: types.CallbackQuery):
     for idx, phone in enumerate(phones):
         new_buckets[(idx % n) + 1].append(phone)
     POOL.apply_distribution(new_buckets)
-    await POOL.reconnect_shift(POOL.active_shift)
 
     await cb.answer(
-        f"✅ {len(phones)} اکانت روی {n} شیفت توزیع و reconnect شد",
+        f"✅ {len(phones)} اکانت روی {n} شیفت توزیع شد — در حال reconnect...",
         show_alert=True,
     )
+    asyncio.create_task(POOL.reconnect_shift(POOL.active_shift))
     try:
         await cb.message.edit_text(
             _build_num_shifts_text(POOL),

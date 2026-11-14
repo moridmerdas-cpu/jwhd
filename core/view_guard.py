@@ -20,7 +20,8 @@ from collections import defaultdict
 
 # ───────── تنظیمات ─────────
 MAX_VIEWS_PER_DAY   = 80     # حداکثر ویو روزانه هر اکانت
-MIN_GAP_SEC         = 8.0    # حداقل فاصله بین دو ویو متوالی از یه اکانت (ثانیه)
+MIN_GAP_SEC         = 2.0    # حداقل فاصله بین دو ویو متوالی از یه اکانت (ثانیه)
+                             # 8s قبلاً باعث میشد نصف اکانت‌ها برای پیام بعدی block باشن
 MAX_GAP_SEC         = 25.0   # حداکثر فاصله طبیعی
 FLOOD_COOLDOWN_MIN  = 300    # cooldown بعد از flood (ثانیه) — حداقل
 FLOOD_COOLDOWN_MAX  = 900    # cooldown بعد از flood (ثانیه) — حداکثر
