@@ -1469,44 +1469,63 @@ async def show_settings(msg: types.Message):
 
 @router.callback_query(F.data.startswith("set:"))
 async def cb_settings(cb: types.CallbackQuery, state: FSMContext):
+    # answer اول — Telegram query بعد از ۱۰ ثانیه expire میشه
+    # هر db call یا import سنگین باید بعد از این باشه
+    try:
+        await cb.answer()
+    except Exception:
+        pass
+
     data = cb.data.split(":")[1]
 
     if data == "shift_timing":
         mn = int(db.get_setting("shift_min_sec", Config.SHIFT_MIN_SEC)) // 60
         mx = int(db.get_setting("shift_max_sec", Config.SHIFT_MAX_SEC)) // 60
-        await cb.message.edit_text(
-            f"⏱️ <b>بازه تایم شیفت</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"⏰ فعلی: <b>{mn}-{mx} دقیقه</b>\n\n"
-            f"یه پیش‌فرض انتخاب کن یا دستی وارد کن:",
-            reply_markup=shift_timing_menu(),
-            parse_mode="HTML",
-        )
+        try:
+            await cb.message.edit_text(
+                f"⏱️ <b>بازه تایم شیفت</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"⏰ فعلی: <b>{mn}-{mx} دقیقه</b>\n\n"
+                f"یه پیش‌فرض انتخاب کن یا دستی وارد کن:",
+                reply_markup=shift_timing_menu(),
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
 
     elif data == "shift_active":
         from core.pool import POOL
         active = POOL.active_shift
         active_label = "🌐 همه شیفت‌ها" if active == 0 else f"شیفت {active}"
-        await cb.message.edit_text(
-            f"🔢 <b>انتخاب شیفت فعال</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"شیفت فعلی: <b>{active_label}</b>\n"
-            f"تعداد شیفت‌ها: <b>{POOL.num_shifts}</b>\n\n"
-            f"👇 شیفت مورد نظر رو انتخاب کن:",
-            reply_markup=shift_select_menu(active),
-            parse_mode="HTML",
-        )
+        try:
+            await cb.message.edit_text(
+                f"🔢 <b>انتخاب شیفت فعال</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"شیفت فعلی: <b>{active_label}</b>\n"
+                f"تعداد شیفت‌ها: <b>{POOL.num_shifts}</b>\n\n"
+                f"👇 شیفت مورد نظر رو انتخاب کن:",
+                reply_markup=shift_select_menu(active),
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
 
     elif data == "guardian":
-        await cb.answer("🛡️ نگهبان هر ۶۰ ثانیه چک می‌کنه", show_alert=True)
+        try:
+            await cb.message.answer("🛡️ نگهبان هر ۶۰ ثانیه چک می‌کنه.")
+        except Exception:
+            pass
 
     elif data == "backup":
         try:
             from core.backup import create_backup
             f = create_backup()
-            await cb.answer(f"✅ بکاپ ساخته شد ({f.stat().st_size//1024}KB)", show_alert=True)
+            await cb.message.answer(f"✅ بکاپ ساخته شد ({f.stat().st_size//1024}KB)")
         except Exception as e:
-            await cb.answer(f"❌ خطا: {e}", show_alert=True)
+            try:
+                await cb.message.answer(f"❌ خطا در بکاپ: {e}")
+            except Exception:
+                pass
 
     elif data == "num_shifts":
         from core.pool import POOL
@@ -1518,40 +1537,41 @@ async def cb_settings(cb: types.CallbackQuery, state: FSMContext):
         )
         total = len(POOL.all_phones)
         per_shift = total // POOL.num_shifts if POOL.num_shifts else 0
-        await cb.message.edit_text(
-            f"🔢 <b>تعداد شیفت‌ها</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"📋 شیفت‌های فعال: <b>{POOL.num_shifts}</b>\n"
-            f"👥 کل اکانت: <b>{total}</b>  (≈{per_shift} اکانت per شیفت)\n"
-            f"⏱️ بازه چرخش: <b>{mn}-{mx} دقیقه</b>\n\n"
-            f"{shift_lines}\n\n"
-            f"👇 تعداد رو تغییر بده — اکانت‌ها خودکار توزیع میشن:",
-            reply_markup=num_shifts_menu(POOL.num_shifts),
-            parse_mode="HTML",
-        )
+        try:
+            await cb.message.edit_text(
+                f"🔢 <b>تعداد شیفت‌ها</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"📋 شیفت‌های فعال: <b>{POOL.num_shifts}</b>\n"
+                f"👥 کل اکانت: <b>{total}</b>  (≈{per_shift} اکانت per شیفت)\n"
+                f"⏱️ بازه چرخش: <b>{mn}-{mx} دقیقه</b>\n\n"
+                f"{shift_lines}\n\n"
+                f"👇 تعداد رو تغییر بده — اکانت‌ها خودکار توزیع میشن:",
+                reply_markup=num_shifts_menu(POOL.num_shifts),
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
 
     elif data == "viewguard":
         from core.view_guard import VIEW_GUARD, MAX_VIEWS_PER_DAY, MIN_GAP_SEC, MAX_GAP_SEC
         from bot.keyboards import viewguard_menu
         stats = VIEW_GUARD.stats()
-        await cb.message.edit_text(
-            f"🔒 <b>تنظیمات ضد لیمیت (ViewGuard)</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"📊 ویوهای امروز (کل): <b>{stats['total_views_today']}</b>\n"
-            f"🚫 اکانت‌های flood: <b>{stats['flooded_now']}</b>\n"
-            f"💤 سهمیه تموم‌شده: <b>{stats['exhausted_today']}</b>\n\n"
-            f"⚙️ تنظیمات فعلی:\n"
-            f"  📅 سهمیه روزانه هر اکانت: <b>{MAX_VIEWS_PER_DAY}</b>\n"
-            f"  ⏳ فاصله بین ویو: <b>{MIN_GAP_SEC:.0f}-{MAX_GAP_SEC:.0f} ثانیه</b>\n\n"
-            f"👇 گزینه مورد نظر:",
-            reply_markup=viewguard_menu(),
-            parse_mode="HTML",
-        )
-
-    try:
-        await cb.answer()
-    except Exception:
-        pass
+        try:
+            await cb.message.edit_text(
+                f"🔒 <b>تنظیمات ضد لیمیت (ViewGuard)</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"📊 ویوهای امروز (کل): <b>{stats['total_views_today']}</b>\n"
+                f"🚫 اکانت‌های flood: <b>{stats['flooded_now']}</b>\n"
+                f"💤 سهمیه تموم‌شده: <b>{stats['exhausted_today']}</b>\n\n"
+                f"⚙️ تنظیمات فعلی:\n"
+                f"  📅 سهمیه روزانه هر اکانت: <b>{MAX_VIEWS_PER_DAY}</b>\n"
+                f"  ⏳ فاصله بین ویو: <b>{MIN_GAP_SEC:.0f}-{MAX_GAP_SEC:.0f} ثانیه</b>\n\n"
+                f"👇 گزینه مورد نظر:",
+                reply_markup=viewguard_menu(),
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
 
 
 def _back_to_settings_kb():
@@ -1588,36 +1608,32 @@ async def cb_ns_set(cb: types.CallbackQuery):
     if not is_admin(cb.from_user.id):
         await cb.answer("⛔ دسترسی ندارید.", show_alert=True)
         return
-    from core.pool import POOL
+
     try:
         n = int(cb.data.split(":")[2])
     except (ValueError, IndexError):
         await cb.answer("❌ مقدار نامعتبر", show_alert=True)
         return
 
+    # answer اول — قبل از هر کار سنگین، وگرنه query expire میشه
+    await cb.answer()
+
+    from core.pool import POOL
     old = POOL.num_shifts
     POOL.set_num_shifts(n)
 
-    # توزیع round-robin اکانت‌ها روی شیفت‌های جدید
     phones = list(POOL.all_phones)
     new_buckets = {i: [] for i in range(1, n + 1)}
     for idx, phone in enumerate(phones):
         new_buckets[(idx % n) + 1].append(phone)
+    # apply_distribution یه batch DB call می‌زنه — اتصالات دست نمی‌خورن
     POOL.apply_distribution(new_buckets)
-
-    # cb.answer باید قبل از کار سنگین صدا زده بشه — Telegram query 10s expire میشه
-    await cb.answer(
-        f"✅ تعداد شیفت‌ها از {old} به {n} تغییر کرد\n"
-        f"👥 {len(phones)} اکانت توزیع شد — در حال reconnect...",
-        show_alert=True,
-    )
-
-    # reconnect بعد از answer — در background انجام میشه
-    asyncio.create_task(POOL.reconnect_shift(0))
+    # فقط status sync — reconnect لازم نیست چون اکانت‌ها هنوز وصلن
+    asyncio.create_task(asyncio.to_thread(POOL._safe_sync))
 
     try:
         await cb.message.edit_text(
-            _build_num_shifts_text(POOL),
+            _build_num_shifts_text(POOL) + f"\n\n✅ از {old} به {n} شیفت تغییر کرد — {len(phones)} اکانت توزیع شد.",
             reply_markup=num_shifts_menu(POOL.num_shifts),
             parse_mode="HTML",
         )
@@ -1631,23 +1647,22 @@ async def cb_ns_redistribute(cb: types.CallbackQuery):
     if not is_admin(cb.from_user.id):
         await cb.answer("⛔ دسترسی ندارید.", show_alert=True)
         return
-    from core.pool import POOL
 
+    # answer اول — قبل از هر کار سنگین
+    await cb.answer()
+
+    from core.pool import POOL
     n = POOL.num_shifts
     phones = list(POOL.all_phones)
     new_buckets = {i: [] for i in range(1, n + 1)}
     for idx, phone in enumerate(phones):
         new_buckets[(idx % n) + 1].append(phone)
+    # batch DB update — اتصالات دست نمی‌خورن
     POOL.apply_distribution(new_buckets)
-
-    await cb.answer(
-        f"✅ {len(phones)} اکانت روی {n} شیفت توزیع شد — در حال reconnect...",
-        show_alert=True,
-    )
-    asyncio.create_task(POOL.reconnect_shift(POOL.active_shift))
+    asyncio.create_task(asyncio.to_thread(POOL._safe_sync))
     try:
         await cb.message.edit_text(
-            _build_num_shifts_text(POOL),
+            _build_num_shifts_text(POOL) + f"\n\n✅ {len(phones)} اکانت روی {n} شیفت توزیع شد.",
             reply_markup=num_shifts_menu(POOL.num_shifts),
             parse_mode="HTML",
         )

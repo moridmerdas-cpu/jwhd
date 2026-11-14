@@ -212,6 +212,23 @@ def update_account_shift(phone: str, shift: str):
     sb.table("accounts").update({"shift": shift}).eq("phone", phone).execute()
 
 
+def update_account_shift_bulk(distribution: dict) -> None:
+    """distribution: {shift_num: [phone, ...]} — یه batch upsert به جای N تا call جدا."""
+    if not distribution:
+        return
+    sb = _get_client()
+    rows = [
+        {"phone": phone, "shift": str(sh)}
+        for sh, phones in distribution.items()
+        for phone in phones
+    ]
+    # supabase-py upsert با on_conflict روی primary key کار می‌کنه
+    # batch رو ۲۰۰ تا ۲۰۰ تا می‌فرستیم تا از payload limit رد نشیم
+    for i in range(0, len(rows), 200):
+        chunk = rows[i:i + 200]
+        sb.table("accounts").upsert(chunk, on_conflict="phone").execute()
+
+
 def get_session(phone: str) -> str | None:
     a = get_account(phone)
     return decrypt(a["session_encrypted"]) if a else None
