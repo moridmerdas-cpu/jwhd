@@ -288,6 +288,29 @@ def chart_reads_last_12h() -> list[dict]:
     return [{"h": h, "ok": c} for h, c in sorted(counts.items())]
 
 
+# ── Joined Links — ردیابی گروه‌هایی که از طریق use_members عضو شدیم ──
+def add_joined_link(raw_link: str, resolved_target) -> None:
+    """لینک/آیدی گروهی که همه اکانت‌ها عضوش شدن رو ذخیره می‌کنه."""
+    sb = _get_client()
+    sb.table("joined_links").upsert(
+        {"raw_link": str(raw_link), "resolved_target": str(resolved_target)},
+        on_conflict="raw_link",
+    ).execute()
+
+
+def get_joined_links() -> list[dict]:
+    """همه گروه‌هایی که از این مسیر عضو شدیم رو برمی‌گردونه."""
+    sb = _get_client()
+    res = sb.table("joined_links").select("*").order("created_at").execute()
+    return res.data or []
+
+
+def remove_joined_link(raw_link: str) -> None:
+    """یه رکورد رو بعد از ترک موفق حذف می‌کنه."""
+    sb = _get_client()
+    sb.table("joined_links").delete().eq("raw_link", str(raw_link)).execute()
+
+
 # ── stub برای compatibility — get_conn حذف شده ───────────────
 def get_conn():
     raise RuntimeError(

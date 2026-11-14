@@ -19,10 +19,11 @@ def main_menu() -> ReplyKeyboardMarkup:
 def use_members_menu() -> InlineKeyboardMarkup:
     """منوی استفاده از ممبرها"""
     b = InlineKeyboardBuilder()
-    b.button(text="🚀 استارت ربات",         callback_data="mem:start_bot")
-    b.button(text="👥 عضو شدن توی گروه",    callback_data="mem:join_group")
-    b.button(text="🤖 ربات ممبر گیر",       callback_data="mem:robot_member")
-    b.button(text="🔙 برگشت",               callback_data="menu:main")
+    b.button(text="🚀 استارت ربات",             callback_data="mem:start_bot")
+    b.button(text="👥 عضو شدن توی گروه",        callback_data="mem:join_group")
+    b.button(text="🚪 ترک گروه‌های عضو شده",    callback_data="mem:leave_joined")
+    b.button(text="🤖 ربات ممبر گیر",           callback_data="mem:robot_member")
+    b.button(text="🔙 برگشت",                   callback_data="menu:main")
     b.adjust(1)
     return b.as_markup()
 

@@ -990,28 +990,79 @@ async def mem_start_bot_link(msg: types.Message, state: FSMContext):
         await msg.answer("❌ لینک معتبر نیست. دوباره بفرست.")
         return
 
+    total_accounts = len(db.get_all_accounts())
+
+    # لینک رو توی FSM ذخیره کن، برو مرحله بعد
+    await state.update_data(start_bot_username=username, start_bot_param=start_param)
+    await state.set_state(UseMembers.waiting_start_bot_count)
+    await msg.answer(
+        f"🔢 <b>تعداد اکانت</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🎯 ربات: <code>@{username}</code>\n"
+        f"🔑 پارامتر: <code>{start_param or '—'}</code>\n\n"
+        f"چند تا اکانت باید استارت بزنن؟\n"
+        f"(کل اکانت‌ها: <b>{total_accounts}</b>)\n\n"
+        f"عدد بفرست یا <code>همه</code> برای همه اکانت‌ها:",
+        reply_markup=cancel_menu(),
+        parse_mode="HTML",
+    )
+
+
+@router.message(StateFilter(UseMembers.waiting_start_bot_count))
+async def mem_start_bot_count(msg: types.Message, state: FSMContext):
+    if not await guard(msg): return
+    raw = (msg.text or "").strip().translate(_FA_DIGITS)
+
+    all_accounts = db.get_all_accounts()
+    total = len(all_accounts)
+
+    if not total:
+        await msg.answer("❌ هیچ اکانتی موجود نیست.")
+        await state.clear()
+        return
+
+    # همه / all / عدد
+    if raw.lower() in ("همه", "all", str(total)):
+        count = total
+    elif raw.isdigit() and 1 <= int(raw) <= total:
+        count = int(raw)
+    else:
+        await msg.answer(
+            f"❌ عدد معتبر وارد کن — بین <b>1</b> تا <b>{total}</b>\n"
+            f"یا بنویس <code>همه</code> برای همه اکانت‌ها.",
+            parse_mode="HTML",
+        )
+        return
+
+    data = await state.get_data()
+    username    = data["start_bot_username"]
+    start_param = data.get("start_bot_param")
     await state.clear()
+
     await msg.answer(
         f"⏳ <b>شروع استارت ربات</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"🎯 ربات: <code>@{username}</code>\n"
-        f"🔑 پارامتر: <code>{start_param or '—'}</code>\n\n"
+        f"🔑 پارامتر: <code>{start_param or '—'}</code>\n"
+        f"👥 تعداد اکانت: <b>{count}</b>\n\n"
         f"در حال اجرا...",
         parse_mode="HTML",
     )
-    asyncio.create_task(_start_bot_all_task(msg, username, start_param))
+    asyncio.create_task(_start_bot_all_task(msg, username, start_param, count))
 
 
-async def _start_bot_all_task(msg: types.Message, username: str, start_param: str | None):
+async def _start_bot_all_task(msg: types.Message, username: str, start_param: str | None, limit: int | None = None):
     """با همه اکانت‌ها یکی یکی /start می‌زنه روی ربات هدف با تاخیر."""
     from core.engine import make_client
     from telethon.tl.functions.messages import StartBotRequest
     import random
 
-    accounts = db.get_all_accounts()
-    if not accounts:
+    all_accounts = db.get_all_accounts()
+    if not all_accounts:
         await msg.answer("❌ هیچ اکانتی موجود نیست.")
         return
+
+    accounts = all_accounts[:limit] if limit and limit < len(all_accounts) else all_accounts
 
     ok = 0
     errors: list[str] = []
@@ -1224,7 +1275,175 @@ async def _join_target_group_all_task(msg: types.Message, group_target):
         text += f"\n🔴 <code>{e}</code>"
     if len(errors) > 5:
         text += f"\n... و {len(errors) - 5} خطای دیگه"
+
+    # اگه حداقل یه اکانت عضو شد، لینک رو برای ترک بعدی ذخیره کن
+    if ok > 0:
+        raw_link_key = str(group_target)
+        db.add_joined_link(raw_link_key, group_target)
+
     await msg.answer(text, reply_markup=main_menu(), parse_mode="HTML")
+
+
+# ─── Handler: ترک همه گروه‌هایی که از این مسیر عضو شدیم ───
+
+@router.callback_query(F.data == "mem:leave_joined")
+async def cb_leave_joined_groups(cb: types.CallbackQuery):
+    await cb.answer()
+    links = db.get_joined_links()
+    if not links:
+        await cb.message.answer(
+            "📭 <b>هیچ گروهی برای ترک وجود نداره</b>\n\n"
+            "فقط گروه‌هایی که از طریق «عضو شدن توی گروه» عضو شدی اینجا نشون داده می‌شن.",
+            parse_mode="HTML",
+        )
+        return
+
+    lines = "\n".join(
+        f"  • <code>{r['raw_link']}</code>" for r in links
+    )
+    await cb.message.answer(
+        f"🚪 <b>ترک گروه‌های عضو شده</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"<b>{len(links)}</b> گروه پیدا شد:\n{lines}\n\n"
+        f"⚠️ همه اکانت‌ها از همه این گروه‌ها خارج می‌شن. ادامه؟",
+        reply_markup=_leave_joined_confirm_menu(),
+        parse_mode="HTML",
+    )
+
+
+def _leave_joined_confirm_menu() -> InlineKeyboardMarkup:
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    b = InlineKeyboardBuilder()
+    b.button(text="✅ بله، ترک کن",   callback_data="mem:leave_joined_confirm")
+    b.button(text="❌ انصراف",         callback_data="menu:main")
+    b.adjust(2)
+    return b.as_markup()
+
+
+@router.callback_query(F.data == "mem:leave_joined_confirm")
+async def cb_leave_joined_confirm(cb: types.CallbackQuery):
+    await cb.answer("⏳ شروع ترک گروه‌ها...")
+    links = db.get_joined_links()
+    if not links:
+        await cb.message.answer("📭 لیست خالیه. چیزی برای ترک نیست.")
+        return
+    asyncio.create_task(_leave_joined_all_task(cb, links))
+
+
+async def _leave_joined_all_task(cb: types.CallbackQuery, links: list[dict]):
+    """با همه اکانت‌ها از همه گروه‌های ذخیره‌شده خارج می‌شه."""
+    from core.engine import make_client
+    from core.entity import resolve_group_entity
+    from telethon.tl.functions.channels import LeaveChannelRequest
+    import random
+
+    accounts = db.get_all_accounts()
+    if not accounts:
+        await cb.message.answer("❌ هیچ اکانتی موجود نیست.")
+        return
+
+    total_ok = 0
+    total_err = 0
+    left_groups: list[str] = []
+
+    progress_msg = await cb.message.answer(
+        f"🚪 <b>ترک گروه‌ها در حال اجرا</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"⏳ 0 / {len(links)} گروه پردازش شد...",
+        parse_mode="HTML",
+    )
+
+    for g_idx, link_row in enumerate(links, 1):
+        raw_link      = link_row["raw_link"]
+        group_target  = link_row["resolved_target"]
+
+        # تشخیص invite hash
+        import re
+        invite_hash = None
+        inv_m = re.search(r"(?:joinchat/|\+)([A-Za-z0-9_\-]+)", raw_link)
+        if inv_m:
+            invite_hash = inv_m.group(1)
+
+        group_ok = 0
+        group_err = 0
+
+        for a in accounts:
+            c = None
+            try:
+                c = make_client(db.get_session(a["phone"]), phone=a["phone"])
+                await asyncio.wait_for(c.connect(), timeout=15)
+
+                if invite_hash:
+                    # برای invite link باید entity رو از hash بگیریم
+                    from telethon.tl.functions.messages import CheckChatInviteRequest
+                    try:
+                        inv_info = await asyncio.wait_for(
+                            c(CheckChatInviteRequest(invite_hash)), timeout=15
+                        )
+                        entity = getattr(inv_info, "chat", None) or getattr(inv_info, "channel", None)
+                    except Exception:
+                        entity = None
+                else:
+                    try:
+                        entity = await asyncio.wait_for(
+                            resolve_group_entity(c, group_target, timeout=15), timeout=20
+                        )
+                    except Exception:
+                        entity = None
+
+                if entity is None:
+                    group_err += 1
+                    continue
+
+                await asyncio.wait_for(c(LeaveChannelRequest(entity)), timeout=20)
+                group_ok += 1
+
+            except Exception as e:
+                err_low = str(e).lower()
+                if "not_in" in err_low or "not a member" in err_low or "chat_id_invalid" in err_low:
+                    group_ok += 1   # قبلاً خارج شده بوده
+                else:
+                    group_err += 1
+                    db.debug_log("handlers", "leave_joined", "WARN",
+                                 f"{a['phone']} / {raw_link}: {type(e).__name__}: {str(e)[:60]}")
+            finally:
+                if c is not None:
+                    try:
+                        await c.disconnect()
+                    except Exception:
+                        pass
+
+            await asyncio.sleep(random.uniform(1.5, 3.5))
+
+        total_ok  += group_ok
+        total_err += group_err
+
+        # اگه همه (یا اکثر) اکانت‌ها خارج شدن، رکورد رو از db پاک کن
+        if group_ok >= max(1, len(accounts) - group_err):
+            db.remove_joined_link(raw_link)
+            left_groups.append(raw_link)
+
+        try:
+            await progress_msg.edit_text(
+                f"🚪 <b>ترک گروه‌ها در حال اجرا</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"✅ {g_idx} / {len(links)} گروه پردازش شد\n"
+                f"✅ خروج موفق اکانت: {total_ok} | ❌ خطا: {total_err}",
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
+
+    left_txt = "\n".join(f"  ✅ <code>{g}</code>" for g in left_groups) or "  —"
+    await cb.message.answer(
+        f"✅ <b>عملیات ترک تموم شد</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"📋 گروه‌های ترک شده ({len(left_groups)}):\n{left_txt}\n\n"
+        f"✅ کل خروج موفق: <b>{total_ok}</b>\n"
+        f"❌ کل خطا: <b>{total_err}</b>",
+        reply_markup=main_menu(),
+        parse_mode="HTML",
+    )
 
 
 # ─────────────────────────────────────────────────────────
