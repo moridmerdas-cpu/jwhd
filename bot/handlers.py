@@ -2165,10 +2165,26 @@ async def add_password(msg: types.Message, state: FSMContext):
         await c.disconnect()
         _pending.pop(msg.from_user.id, None)
         acc_id = db.add_account(phone, ss)
+
+        # اکانت جدید رو بلافاصله وارد pool کن (همون منطق مسیر بدون 2FA)
+        pool_ok = False
+        try:
+            from core.pool import POOL
+            pool_ok = await asyncio.wait_for(POOL.add_account_live(phone), timeout=40) is not None
+        except Exception as _pe:
+            db.debug_log("handlers", "pool_add_2fa", "WARN", f"{type(_pe).__name__}: {_pe}")
+
         await msg.answer(
-            f"✅ <b>اکانت با 2FA اضافه شد!</b>\n\n"
-            f"👤 {me.first_name}\n"
-            f"🎫 {acc_id}",
+            f"✅ <b>اکانت با 2FA اضافه شد!</b>
+"
+            f"━━━━━━━━━━━━━━━━━━━━━━
+
+"
+            f"👤 نام: <b>{me.first_name}</b>
+"
+            f"🎫 شناسه: <code>{acc_id}</code>
+"
+            f"🔌 اتصال به pool: {'✅' if pool_ok else '⚠️ بعداً خودکار وصل میشه'}",
             reply_markup=main_menu(),
             parse_mode="HTML",
         )

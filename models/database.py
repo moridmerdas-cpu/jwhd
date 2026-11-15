@@ -213,20 +213,22 @@ def update_account_shift(phone: str, shift: str):
 
 
 def update_account_shift_bulk(distribution: dict) -> None:
-    """distribution: {shift_num: [phone, ...]} — یه batch upsert به جای N تا call جدا."""
+    """distribution: {shift_num: [phone, ...]} — batch update فقط ستون shift.
+    
+    NOTE: از upsert استفاده نمی‌کنیم چون upsert با payload ناقص (فقط phone+shift)
+    می‌تونه session_encrypted و بقیه ستون‌ها رو null کنه اگه row جدید باشه یا
+    supabase-py رفتار merge نکنه. به جاش per-shift یه update با IN می‌زنیم.
+    """
     if not distribution:
         return
     sb = _get_client()
-    rows = [
-        {"phone": phone, "shift": str(sh)}
-        for sh, phones in distribution.items()
-        for phone in phones
-    ]
-    # supabase-py upsert با on_conflict روی primary key کار می‌کنه
-    # batch رو ۲۰۰ تا ۲۰۰ تا می‌فرستیم تا از payload limit رد نشیم
-    for i in range(0, len(rows), 200):
-        chunk = rows[i:i + 200]
-        sb.table("accounts").upsert(chunk, on_conflict="phone").execute()
+    for sh, phones in distribution.items():
+        if not phones:
+            continue
+        # batch رو ۲۰۰ تا ۲۰۰ می‌فرستیم
+        for i in range(0, len(phones), 200):
+            chunk = phones[i:i + 200]
+            sb.table("accounts").update({"shift": str(sh)}).in_("phone", chunk).execute()
 
 
 def get_session(phone: str) -> str | None:
