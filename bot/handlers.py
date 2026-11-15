@@ -2175,15 +2175,10 @@ async def add_password(msg: types.Message, state: FSMContext):
             db.debug_log("handlers", "pool_add_2fa", "WARN", f"{type(_pe).__name__}: {_pe}")
 
         await msg.answer(
-            f"✅ <b>اکانت با 2FA اضافه شد!</b>
-"
-            f"━━━━━━━━━━━━━━━━━━━━━━
-
-"
-            f"👤 نام: <b>{me.first_name}</b>
-"
-            f"🎫 شناسه: <code>{acc_id}</code>
-"
+            "✅ <b>اکانت با 2FA اضافه شد!</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"👤 نام: <b>{me.first_name}</b>\n"
+            f"🎫 شناسه: <code>{acc_id}</code>\n"
             f"🔌 اتصال به pool: {'✅' if pool_ok else '⚠️ بعداً خودکار وصل میشه'}",
             reply_markup=main_menu(),
             parse_mode="HTML",
